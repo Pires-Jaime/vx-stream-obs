@@ -16,11 +16,11 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
-// Étape 0 — validation de la chaîne de build, volontairement minimale.
-// Objectif unique : prouver que la DLL charge dans OBS 32.x et qu'un menu
-// « VX.Stream » apparaît dans la barre de menus, à côté de « Aide ».
-// Aucune logique métier ici : si ce menu s'affiche, la toolchain (MSVC + Qt de
-// l'ABI d'OBS + libobs) est validée et tout le reste n'est plus que du code.
+// Étape 1 (palier B) : le plugin devient autonome —
+//   • docks navigateur créés NATIVEMENT (via le CEF d'obs-browser), plus
+//     besoin de l'installeur qui écrivait ExtraBrowserDocks dans user.ini ;
+//   • thème « Valerix » copié dans les thèmes utilisateur ;
+//   • menu VX.Stream : cases afficher/masquer par dock + raccourcis web.
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -30,11 +30,17 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
+#include <QMessageBox>
 #include <QDesktopServices>
 #include <QUrl>
 
+#include "vx-docks.hpp"
+#include "vx-theme.hpp"
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
+
+static bool themeInstalled = false;
 
 static void open_url(const char *url)
 {
@@ -43,9 +49,6 @@ static void open_url(const char *url)
 
 static void add_vx_menu(void)
 {
-	// La fenêtre principale d'OBS est une QMainWindow : sa menuBar() est la
-	// barre Fichier … Aide. Qt ajoute le nouveau menu en dernier, donc à
-	// droite de « Aide » — exactement l'emplacement demandé.
 	auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 	if (!window) {
 		obs_log(LOG_WARNING, "fenêtre principale introuvable, menu non ajouté");
@@ -54,15 +57,41 @@ static void add_vx_menu(void)
 
 	QMenu *menu = window->menuBar()->addMenu(QStringLiteral("VX.Stream"));
 
-	QAction *docks = menu->addAction(QStringLiteral("Configurer mes docks…"));
-	QObject::connect(docks, &QAction::triggered, [] { open_url("https://valerix.stream/obs"); });
+	// ── Docks : cases à cocher natives (toggleViewAction, toujours synchro) ──
+	if (vx_docks_available()) {
+		size_t n = 0;
+		const char *const *ids = vx_dock_ids(&n);
+		for (size_t i = 0; i < n; i++) {
+			QAction *a = vx_dock_toggle_action(ids[i]);
+			if (a)
+				menu->addAction(a);
+		}
+	} else {
+		QAction *warn = menu->addAction(QStringLiteral("⚠ Docks indisponibles (obs-browser manquant)"));
+		warn->setEnabled(false);
+	}
+
+	menu->addSeparator();
+
+	QAction *theme = menu->addAction(QStringLiteral("Activer le thème Valerix…"));
+	QObject::connect(theme, &QAction::triggered, [window] {
+		QMessageBox::information(window, QStringLiteral("Thème Valerix"),
+					 themeInstalled
+						 ? QStringLiteral("Le thème est installé.\n\nParamètres → Apparence → Thème : « Valerix »,\npuis appliquez.")
+						 : QStringLiteral("Le thème n'a pas pu être installé.\nConsultez le journal OBS (vx-stream)."));
+	});
+
+	menu->addSeparator();
+
+	QAction *docksCfg = menu->addAction(QStringLiteral("Configurer mes docks…"));
+	QObject::connect(docksCfg, &QAction::triggered, [] { open_url("https://valerix.stream/obs"); });
 
 	QAction *dash = menu->addAction(QStringLiteral("Ouvrir mon dashboard Valerix…"));
 	QObject::connect(dash, &QAction::triggered, [] { open_url("https://valerix.stream/dashboard"); });
 
 	menu->addSeparator();
 
-	QAction *about = menu->addAction(QStringLiteral("VX.Stream v%1 — étape 0").arg(PLUGIN_VERSION));
+	QAction *about = menu->addAction(QStringLiteral("VX.Stream v%1").arg(PLUGIN_VERSION));
 	about->setEnabled(false);
 
 	obs_log(LOG_INFO, "menu VX.Stream ajouté à la barre de menus");
@@ -70,10 +99,13 @@ static void add_vx_menu(void)
 
 static void on_frontend_event(enum obs_frontend_event event, void *)
 {
-	// On attend la fin du chargement de l'UI : ajouter le menu pendant que la
-	// fenêtre se construit encore est le crash classique des plugins frontend.
-	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING)
+	// FINISHED_LOADING : l'UI est construite. Ordre importe — les docks
+	// d'abord (le menu récupère leurs toggleViewAction).
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+		vx_create_docks();
+		themeInstalled = vx_install_theme();
 		add_vx_menu();
+	}
 }
 
 bool obs_module_load(void)

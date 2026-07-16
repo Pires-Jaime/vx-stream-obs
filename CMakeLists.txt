@@ -34,6 +34,11 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.cpp)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.cpp src/vx-docks.cpp src/vx-theme.cpp)
+
+# browser-panel.hpp : interface QCef d'obs-browser (copie alignée sur le
+# submodule d'OBS 32.0.4 — ABI virtuelle, ne pas prendre un master divergent).
+# Chargée dynamiquement à l'exécution : aucun lien vers obs-browser.
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs-browser")
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

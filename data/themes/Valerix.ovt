@@ -1,0 +1,29 @@
+@OBSThemeMeta {
+    name: 'Valerix';
+    id: 'stream.valerix.theme';
+    extends: 'com.obsproject.Yami';
+    author: 'Valerix';
+    dark: 'true';
+}
+
+/* Palette « Dark Forge » de valerix.stream : accent violet #7c3aed, fonds
+   noir-violet profonds. On ne surcharge QUE des variables — tout le layout
+   reste celui de Yami, donc le thème survit aux mises à jour d'OBS. */
+@OBSThemeVars {
+    /* Accent : bleu Yami → violet Valerix */
+    --primary_lighter: #a78bfa;
+    --primary_light: #8b5cf6;
+    --primary: #7c3aed;
+    --primary_dark: #6d28d9;
+    --primary_darker: #5b21b6;
+
+    /* Fonds : gris-bleu Yami → gris-violet, plus profonds */
+    --grey1: #5e5a78;
+    --grey2: #514d68;
+    --grey3: #46425b;
+    --grey4: #3a374d;
+    --grey5: #2f2c40;
+    --grey6: #252333;
+    --grey7: #1a1826;
+    --grey8: #110f1a;
+}

@@ -75,10 +75,13 @@ static void add_vx_menu(void)
 
 	QAction *theme = menu->addAction(QStringLiteral("Activer le thème Valerix…"));
 	QObject::connect(theme, &QAction::triggered, [window] {
-		QMessageBox::information(window, QStringLiteral("Thème Valerix"),
-					 themeInstalled
-						 ? QStringLiteral("Le thème est installé.\n\nParamètres → Apparence → Thème : « Valerix »,\npuis appliquez.")
-						 : QStringLiteral("Le thème n'a pas pu être installé.\nConsultez le journal OBS (vx-stream)."));
+		QMessageBox::information(
+			window, QStringLiteral("Thème Valerix"),
+			themeInstalled
+				? QStringLiteral(
+					  "Le thème est installé.\n\nParamètres → Apparence → Thème : « Valerix »,\npuis appliquez.")
+				: QStringLiteral(
+					  "Le thème n'a pas pu être installé.\nConsultez le journal OBS (vx-stream)."));
 	});
 
 	menu->addSeparator();

@@ -142,6 +142,13 @@ jobs:
           codesign: ${{ fromJSON(needs.check-event.outputs.codesign) }}
           codesignIdent: ${{ steps.codesign.outputs.codesignIdent }}
 
+      - name: Dump Build Failure 🔎
+        if: failure()
+        shell: bash
+        run: |
+          cmake --build --preset macos-ci 2>&1 | tail -n 40 > buildtail.txt || true
+          while IFS= read -r line; do echo "::error::$line"; done < buildtail.txt
+
       - name: Package Plugin 📀
         uses: ./.github/actions/package-plugin
         with:
@@ -217,6 +224,13 @@ jobs:
           target: x86_64
           config: ${{ needs.check-event.outputs.config }}
 
+      - name: Dump Build Failure 🔎
+        if: failure()
+        shell: bash
+        run: |
+          cmake --build --preset ubuntu-ci-x86_64 2>&1 | tail -n 40 > buildtail.txt || true
+          while IFS= read -r line; do echo "::error::$line"; done < buildtail.txt
+
       - name: Package Plugin 📀
         uses: ./.github/actions/package-plugin
         with:
@@ -282,6 +296,13 @@ jobs:
         with:
           target: x64
           config: ${{ needs.check-event.outputs.config }}
+
+      - name: Dump Build Failure 🔎
+        if: failure()
+        shell: bash
+        run: |
+          cmake --build --preset windows-ci-x64 2>&1 | tail -n 40 > buildtail.txt || true
+          while IFS= read -r line; do echo "::error::$line"; done < buildtail.txt
 
       - name: Package Plugin 📀
         uses: ./.github/actions/package-plugin

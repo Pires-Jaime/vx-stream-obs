@@ -23,6 +23,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <cctype>
 #include <ctime>
 
 #include "vx-multistream.hpp"

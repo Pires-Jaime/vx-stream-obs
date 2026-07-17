@@ -36,7 +36,13 @@ endif()
 
 target_sources(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE src/plugin-main.cpp src/vx-docks.cpp src/vx-theme.cpp src/vx-multistream.cpp src/vx-multistream-dialog.cpp
+  PRIVATE
+    src/plugin-main.cpp
+    src/vx-docks.cpp
+    src/vx-theme.cpp
+    src/vx-multistream.cpp
+    src/vx-multistream-dialog.cpp
+    src/vx-updater.cpp
 )
 
 # browser-panel.hpp : interface QCef d'obs-browser (copie alignée sur le

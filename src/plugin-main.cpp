@@ -38,6 +38,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "vx-multistream-dialog.hpp"
 #include "vx-multistream.hpp"
 #include "vx-theme.hpp"
+#include "vx-updater.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -105,6 +106,9 @@ static void add_vx_menu(void)
 	about->setEnabled(false);
 
 	obs_log(LOG_INFO, "menu VX.Stream ajouté à la barre de menus");
+
+	// Vérification de mise à jour en arrière-plan (jamais bloquant).
+	vx_updater_check(menu);
 }
 
 static void on_frontend_event(enum obs_frontend_event event, void *)

@@ -6,24 +6,67 @@
     dark: 'true';
 }
 
-/* Palette « Dark Forge » de valerix.stream : accent violet #7c3aed, fonds
-   noir-violet profonds. On ne surcharge QUE des variables — tout le layout
-   reste celui de Yami, donc le thème survit aux mises à jour d'OBS. */
+/* Palette « Dark Forge » de valerix.stream — v2 complète.
+   On ne surcharge QUE des variables (le layout reste celui de Yami, donc le
+   thème survit aux mises à jour d'OBS). Le VU-mètre du mélangeur lit
+   --green*/--yellow*/--red* : le « nominal » passe en violet Valerix, mais
+   warning (jaune) et saturation (rouge) sont conservés — c'est un code de
+   sécurité audio, pas de la déco. */
 @OBSThemeVars {
-    /* Accent : bleu Yami → violet Valerix */
+    /* ── Accent : violet Valerix ─────────────────────────────────────── */
     --primary_lighter: #a78bfa;
     --primary_light: #8b5cf6;
     --primary: #7c3aed;
     --primary_dark: #6d28d9;
     --primary_darker: #5b21b6;
 
-    /* Fonds : gris-bleu Yami → gris-violet, plus profonds */
-    --grey1: #5e5a78;
-    --grey2: #514d68;
-    --grey3: #46425b;
-    --grey4: #3a374d;
-    --grey5: #2f2c40;
-    --grey6: #252333;
-    --grey7: #1a1826;
-    --grey8: #110f1a;
+    /* Le bleu Yami sert d'accent secondaire un peu partout → aligné violet */
+    --blue1: #a78bfa;
+    --blue2: #8b5cf6;
+    --blue3: #7c3aed;
+    --blue4: #6d28d9;
+    --blue5: #5b21b6;
+
+    /* ── Fonds : noir-violet profond (Dark Forge) ────────────────────── */
+    --grey1: #5c547b;
+    --grey2: #4e4769;
+    --grey3: #403a57;
+    --grey4: #322d45;
+    --grey5: #262236;
+    --grey6: #1c1929;
+    --grey7: #14111f;
+    --grey8: #0c0a14;
+
+    --bg_window: var(--grey7);
+    --bg_base: var(--grey6);
+    --bg_preview: #08060f;
+
+    /* ── Textes ──────────────────────────────────────────────────────── */
+    --text: #f1f1f5;
+    --text_light: #d6d3e3;
+    --text_muted: #8f8aa5;
+
+    /* ── Champs, listes, sélections ──────────────────────────────────── */
+    --input_bg: var(--grey5);
+    --input_bg_hover: var(--grey4);
+    --input_bg_focus: var(--grey6);
+    --input_border: var(--grey4);
+    --border_color: var(--grey5);
+
+    --list_item_bg_selected: var(--primary_dark);
+    --list_item_bg_hover: rgba(124, 58, 237, 0.25);
+
+    /* ── Arrondis façon site Valerix ─────────────────────────────────── */
+    --border_radius: 6px;
+    --border_radius_small: 4px;
+    --border_radius_large: 8px;
+
+    /* ── Mélangeur audio (VolumeMeter lit --green* pour le nominal) ──── */
+    /* Échelle claire→sombre respectée : barres violettes, fond violet nuit. */
+    --green1: #b5a1fb;
+    --green2: #9d7ff8;
+    --green3: #7c3aed;
+    --green4: #6428d4;
+    --green5: #3b2173;
+    /* warning/error : on NE touche pas --yellow* ni --red* (clipping). */
 }

@@ -8,6 +8,7 @@
 !/data
 !/src
 !/deps
+!/installer
 !.clang-format
 !.gersemirc
 !.gitignore
@@ -25,3 +26,9 @@
 
 # Exclude CMake build number cache
 /cmake/.CMakeBuildNumber
+
+# Générés par la CI de l'installateur
+/installer/payload/
+/installer/nsis-plugins/
+/installer/*.exe
+/installer/*.zip

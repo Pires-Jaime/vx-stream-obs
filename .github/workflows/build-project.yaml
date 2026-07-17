@@ -316,3 +316,69 @@ jobs:
         with:
           name: ${{ steps.setup.outputs.pluginName }}-${{ steps.setup.outputs.pluginVersion }}-windows-x64-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/release/${{ steps.setup.outputs.pluginName }}-${{ steps.setup.outputs.pluginVersion }}-windows-x64*.*
+
+  installer:
+    name: Build Installer 💿
+    runs-on: ubuntu-24.04
+    needs: [check-event, windows-build]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set Up Environment 🔧
+        id: setup
+        run: |
+          : Set Up Environment 🔧
+          read -r product_name product_version <<< \
+            "$(jq -r '. | {name, version} | join(" ")' buildspec.json)"
+          echo "pluginName=${product_name}" >> $GITHUB_OUTPUT
+          echo "pluginVersion=${product_version}" >> $GITHUB_OUTPUT
+          sudo apt-get -qq update && sudo apt-get -qq install -y nsis
+
+      - name: Download Plugin Artifact 📥
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.setup.outputs.pluginName }}-${{ steps.setup.outputs.pluginVersion }}-windows-x64-${{ needs.check-event.outputs.commitHash }}
+          path: plugin-artifact
+
+      - name: Prepare Payload 📦
+        working-directory: installer
+        run: |
+          : Prepare Payload 📦
+          # Plugin VX.Stream — l'artefact contient le zip du prefix d'install.
+          mkdir -p payload/vx payload/vertical nsis-plugins/x86-unicode
+          unzip -q ../plugin-artifact/*windows-x64*.zip -d payload/vx
+          # Si le zip a un unique dossier racine, on remonte son contenu.
+          if [ "$(ls payload/vx | wc -l)" = "1" ] && [ -d "payload/vx/$(ls payload/vx)" ]; then
+            top="payload/vx/$(ls payload/vx)"; mv "$top"/* payload/vx/; rmdir "$top"
+          fi
+          test -d payload/vx/obs-plugins || { echo '::error::structure payload vx inattendue'; ls -R payload/vx | head; exit 1; }
+
+          # Aitum Vertical Canvas (GPL) — version épinglée.
+          curl -sL -o vertical.zip \
+            'https://github.com/aitum/obs-vertical-canvas/releases/download/1.6.4/vertical-canvas-windows.zip'
+          unzip -q vertical.zip -d payload/vertical
+          if [ "$(ls payload/vertical | wc -l)" = "1" ] && [ -d "payload/vertical/$(ls payload/vertical)" ]; then
+            top="payload/vertical/$(ls payload/vertical)"; mv "$top"/* payload/vertical/; rmdir "$top"
+          fi
+          test -d payload/vertical/obs-plugins || { echo '::error::structure payload vertical inattendue'; ls -R payload/vertical | head; exit 1; }
+
+          # Plugin NSIS de téléchargement (INetC).
+          curl -sL -o inetc.zip 'https://nsis.sourceforge.io/mediawiki/images/c/c9/Inetc.zip'
+          unzip -q inetc.zip -d inetc
+          cp inetc/Plugins/x86-unicode/INetC.dll nsis-plugins/x86-unicode/
+
+      - name: Build Installer 💿
+        working-directory: installer
+        run: |
+          : Build Installer 💿
+          makensis -DVERSION=${{ steps.setup.outputs.pluginVersion }} vxstream-installer.nsi
+          ls -la VX.Stream-Installer-*.exe
+
+      - name: Upload Installer 📡
+        uses: actions/upload-artifact@v4
+        with:
+          name: vxstream-installer-${{ steps.setup.outputs.pluginVersion }}-${{ needs.check-event.outputs.commitHash }}
+          path: installer/VX.Stream-Installer-*.exe

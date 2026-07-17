@@ -19,6 +19,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <plugin-support.h>
 
 #include <QMainWindow>
+
+#include <vector>
 #include <QDockWidget>
 
 #include <browser-panel.hpp>
@@ -27,6 +29,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 static QCef *cef = nullptr;
 static QCefCookieManager *cookies = nullptr;
+// Nos widgets CEF : gardés pour pouvoir fermer les navigateurs SYNCHRONEMENT
+// sur EXIT — indispensable, cf. vx_destroy_docks.
+static std::vector<QCefWidget *> widgets;
 
 struct VxDock {
 	const char *id;
@@ -79,6 +84,7 @@ bool vx_create_docks(void)
 			continue;
 		}
 		w->setMinimumSize(240, 200);
+		widgets.push_back(w);
 		obs_frontend_add_dock_by_id(d.id, d.title, w);
 		obs_log(LOG_INFO, "dock natif ajouté : %s", d.title);
 	}
@@ -90,17 +96,28 @@ void vx_destroy_docks(void)
 	if (!cef)
 		return;
 	// Appelé sur OBS_FRONTEND_EVENT_EXIT — le moment clé : CEF est encore
-	// vivant. Si on laisse OBS détruire nos docks avec la fenêtre principale
-	// (~OBSBasic), c'est APRÈS le déchargement d'obs-browser → closeBrowser
-	// s'exécute dans un CEF à l'agonie → crash systématique à la fermeture
-	// (vu dans le crash log : QCefWidgetInternal::closeBrowser sous
-	// obs-browser!obs_module_unload/Thrd_join).
+	// vivant. Deux crash logs de fermeture nous ont appris, dans l'ordre :
+	//   1. laisser OBS détruire les docks avec la fenêtre (~OBSBasic) arrive
+	//      APRÈS le déchargement d'obs-browser → crash (fix 0.5.2) ;
+	//   2. remove_dock seul ne suffit PAS : la destruction Qt du dock (et donc
+	//      le closeBrowser) reste différée (deleteLater) et retombe pendant
+	//      l'arrêt de CEF → crash encore (log 0.6.1). D'où : fermer chaque
+	//      navigateur EXPLICITEMENT et MAINTENANT, puis retirer les docks,
+	//      puis détruire le cookie manager — plus aucune ressource CEF à nous
+	//      quand obs-browser s'éteint.
+	for (QCefWidget *w : widgets)
+		w->closeBrowser();
+	widgets.clear();
+
 	size_t n = 0;
 	const char *const *ids = vx_dock_ids(&n);
 	for (size_t i = 0; i < n; i++)
 		obs_frontend_remove_dock(ids[i]);
+
+	delete cookies;
+	cookies = nullptr;
 	cef = nullptr;
-	obs_log(LOG_INFO, "docks CEF retirés avant l'arrêt de CEF");
+	obs_log(LOG_INFO, "navigateurs CEF fermés et docks retirés avant l'arrêt de CEF");
 }
 
 QAction *vx_dock_toggle_action(const char *id)

@@ -95,11 +95,13 @@ public:
 
 	void closeWeb()
 	{
-		// Détruire le navigateur PENDANT que CEF est vivant (même règle que
-		// les docks — cf. le crash de fermeture corrigé en 0.5.2).
+		// Fermer le navigateur PENDANT que CEF est vivant, et détruire le
+		// widget SYNCHRONEMENT : un deleteLater retomberait dans la boucle
+		// d'événements du shutdown, après l'arrêt de CEF (leçon du crash
+		// 0.6.1 — la version différée avait recréé le crash de fermeture).
 		if (web) {
 			web->closeBrowser();
-			web->deleteLater();
+			delete web;
 			web = nullptr;
 		}
 	}
@@ -223,7 +225,7 @@ void vx_scenes_shutdown(void)
 {
 	if (dialog) {
 		dialog->closeWeb();
-		dialog->deleteLater();
+		delete dialog; // synchrone — un deleteLater arriverait après l'arrêt de CEF
 		dialog = nullptr;
 	}
 }

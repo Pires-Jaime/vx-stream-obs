@@ -125,7 +125,10 @@ private slots:
 		rows.clear();
 
 		const QJsonArray arr = o.value(QStringLiteral("overlays")).toArray();
-		for (const auto &v : arr) {
+		// Par VALEUR : l'itérateur de QJsonArray produit un proxy temporaire
+		// (QJsonValueConstRef) — une référence dessus = -Wrange-loop-bind-reference
+		// promu en erreur chez AppleClang (seule plateforme à l'activer).
+		for (const auto v : arr) {
 			const QJsonObject ov = v.toObject();
 			OverlayInfo info;
 			info.name = ov.value(QStringLiteral("name")).toString(QStringLiteral("Overlay"));

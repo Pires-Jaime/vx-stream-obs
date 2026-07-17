@@ -11,6 +11,9 @@ class QAction;
 /** Initialise CEF (via obs-browser) et enregistre les 4 docks VX. */
 bool vx_create_docks(void);
 
+/** Retire les docks pendant que CEF est encore vivant (à appeler sur EXIT). */
+void vx_destroy_docks(void);
+
 /** obs-browser était-il disponible ? (false = docks non créés) */
 bool vx_docks_available(void);
 

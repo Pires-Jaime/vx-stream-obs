@@ -129,6 +129,12 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
 		vx_ms_on_streaming_stopping();
 		break;
+	// EXIT : détruire les docks CEF MAINTENANT, avant le déchargement des
+	// modules — sinon crash garanti à chaque fermeture (cf. vx_destroy_docks).
+	case OBS_FRONTEND_EVENT_EXIT:
+		vx_ms_on_streaming_stopping();
+		vx_destroy_docks();
+		break;
 	default:
 		break;
 	}

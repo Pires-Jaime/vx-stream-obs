@@ -73,6 +73,24 @@ bool vx_create_docks(void)
 	return true;
 }
 
+void vx_destroy_docks(void)
+{
+	if (!cef)
+		return;
+	// Appelé sur OBS_FRONTEND_EVENT_EXIT — le moment clé : CEF est encore
+	// vivant. Si on laisse OBS détruire nos docks avec la fenêtre principale
+	// (~OBSBasic), c'est APRÈS le déchargement d'obs-browser → closeBrowser
+	// s'exécute dans un CEF à l'agonie → crash systématique à la fermeture
+	// (vu dans le crash log : QCefWidgetInternal::closeBrowser sous
+	// obs-browser!obs_module_unload/Thrd_join).
+	size_t n = 0;
+	const char *const *ids = vx_dock_ids(&n);
+	for (size_t i = 0; i < n; i++)
+		obs_frontend_remove_dock(ids[i]);
+	cef = nullptr;
+	obs_log(LOG_INFO, "docks CEF retirés avant l'arrêt de CEF");
+}
+
 QAction *vx_dock_toggle_action(const char *id)
 {
 	auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window());

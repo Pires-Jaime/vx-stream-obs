@@ -83,15 +83,21 @@ Section "OBS Studio (si absent)" SecObs
 obs_done:
 SectionEnd
 
+; Les plugins vont dans C:\ProgramData\obs-studio\plugins (layout « plugin
+; folder » d'OBS 28+, celui produit par obs-plugintemplate : <nom>/bin/64bit).
+; SetShellVarContext all fait pointer $APPDATA sur ProgramData.
+
 Section "Plugin VX.Stream" SecVx
   SectionIn RO ; c'est l'objet même de l'installateur
-  SetOutPath "$INSTDIR"
+  SetShellVarContext all
+  SetOutPath "$APPDATA\obs-studio\plugins"
   File /r "payload\vx\"
   DetailPrint "Plugin VX.Stream installé."
 SectionEnd
 
 Section "Canvas vertical (TikTok / mobile)" SecVertical
-  SetOutPath "$INSTDIR"
+  SetShellVarContext all
+  SetOutPath "$APPDATA\obs-studio\plugins"
   File /r "payload\vertical\"
   DetailPrint "Aitum Vertical Canvas installé."
 SectionEnd
@@ -118,12 +124,9 @@ SectionEnd
 ; ── Désinstallation (retire NOS fichiers, jamais OBS) ─────────────────────────
 Section "Uninstall"
   SetRegView 64
-  Delete "$INSTDIR\obs-plugins\64bit\vx-stream.dll"
-  Delete "$INSTDIR\obs-plugins\64bit\vx-stream.pdb"
-  RMDir /r "$INSTDIR\data\obs-plugins\vx-stream"
-  Delete "$INSTDIR\obs-plugins\64bit\vertical-canvas.dll"
-  Delete "$INSTDIR\obs-plugins\64bit\vertical-canvas.pdb"
-  RMDir /r "$INSTDIR\data\obs-plugins\vertical-canvas"
+  SetShellVarContext all
+  RMDir /r "$APPDATA\obs-studio\plugins\vx-stream"
+  RMDir /r "$APPDATA\obs-studio\plugins\vertical-canvas"
   Delete "$INSTDIR\Uninstall-VXStream.exe"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VXStream"
 SectionEnd

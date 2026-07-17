@@ -144,6 +144,11 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+	// Sans ce remove, le frontend garde un pointeur vers notre code après le
+	// déchargement de la DLL → crash à la fermeture d'OBS dès qu'un événement
+	// tardif arrive (c'est le bug « OBS a planté » systématique à l'exit).
+	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
+	vx_updater_shutdown();
 	vx_ms_shutdown();
 	obs_log(LOG_INFO, "VX.Stream déchargé");
 }

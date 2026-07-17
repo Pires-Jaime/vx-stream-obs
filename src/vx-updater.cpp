@@ -124,6 +124,12 @@ static std::string http_get_version_body()
 	HINTERNET net = InternetOpenA("vx-stream-plugin", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
 	if (!net)
 		return body;
+	// Timeouts courts : ce thread est JOINT à l'unload du module — il ne doit
+	// jamais retenir la fermeture d'OBS plus de quelques secondes.
+	DWORD t = 5000;
+	InternetSetOptionA(net, INTERNET_OPTION_CONNECT_TIMEOUT, &t, sizeof(t));
+	InternetSetOptionA(net, INTERNET_OPTION_RECEIVE_TIMEOUT, &t, sizeof(t));
+	InternetSetOptionA(net, INTERNET_OPTION_SEND_TIMEOUT, &t, sizeof(t));
 	HINTERNET conn = InternetConnectA(net, VERSION_URL_HOST, INTERNET_DEFAULT_HTTPS_PORT, nullptr, nullptr,
 					  INTERNET_SERVICE_HTTP, 0, 0);
 	if (conn) {
@@ -150,10 +156,21 @@ static std::string http_get_version_body()
 }
 #endif
 
+static std::thread checkThread;
+
+void vx_updater_shutdown(void)
+{
+	// Join (pas detach) : un thread survivant au déchargement de la DLL
+	// exécuterait du code disparu → crash à la fermeture d'OBS. Les timeouts
+	// WinINet de 5 s bornent l'attente au pire cas.
+	if (checkThread.joinable())
+		checkThread.join();
+}
+
 void vx_updater_check(QMenu *menu)
 {
-	// Thread détaché : le lancement d'OBS ne doit JAMAIS attendre le réseau.
-	std::thread([menu] {
+	// Thread joignable : le lancement d'OBS ne doit JAMAIS attendre le réseau.
+	checkThread = std::thread([menu] {
 		const std::string body = http_get_version_body();
 		const std::string remote = parse_version(body);
 		if (remote.empty() || !is_newer(remote, PLUGIN_VERSION)) {
@@ -195,5 +212,5 @@ void vx_updater_check(QMenu *menu)
 				}
 			},
 			Qt::QueuedConnection);
-	}).detach();
+	});
 }

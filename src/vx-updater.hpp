@@ -13,3 +13,9 @@ class QMenu;
  * dans la config du module pour ne pas harceler à chaque lancement d'OBS).
  */
 void vx_updater_check(QMenu *menu);
+
+/**
+ * Attend la fin du thread de vérification (unload du module). Sans ce join,
+ * un thread encore vivant survivrait au déchargement de la DLL → crash.
+ */
+void vx_updater_shutdown(void);

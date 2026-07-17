@@ -10,6 +10,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 // est simplement absent (la cible de l'installateur est Windows).
 
 #include <obs-module.h>
+#include <obs-frontend-api.h>
 #include <plugin-support.h>
 #include <util/platform.h>
 
@@ -113,10 +114,18 @@ void write_notified(const std::string &v)
 #ifdef _WIN32
 #include <windows.h>
 #include <wininet.h>
+#include <shellapi.h>
 #pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "shell32.lib")
+
+#include <QApplication>
+#include <QMainWindow>
+
+#include <cstdio>
 
 static const char *VERSION_URL_HOST = "valerix.stream";
 static const char *VERSION_URL_PATH = "/api/vx-stream/version";
+static const char *INSTALLER_PATH = "/downloads/VX.Stream-Installer.exe";
 
 static std::string http_get_version_body()
 {
@@ -149,10 +158,80 @@ static std::string http_get_version_body()
 	InternetCloseHandle(net);
 	return body;
 }
+// Télécharge l'installateur (~3,5 Mo) dans %TEMP%. Chaîne vide si échec.
+static std::string download_installer()
+{
+	char tmp[MAX_PATH];
+	if (!GetTempPathA(sizeof(tmp), tmp))
+		return {};
+	std::string dest = std::string(tmp) + "VXStream-Update.exe";
+
+	HINTERNET net = InternetOpenA("vx-stream-plugin", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+	if (!net)
+		return {};
+	bool ok = false;
+	HINTERNET conn = InternetConnectA(net, VERSION_URL_HOST, INTERNET_DEFAULT_HTTPS_PORT, nullptr, nullptr,
+					  INTERNET_SERVICE_HTTP, 0, 0);
+	if (conn) {
+		HINTERNET req = HttpOpenRequestA(conn, "GET", INSTALLER_PATH, nullptr, nullptr, nullptr,
+						 INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE, 0);
+		if (req && HttpSendRequestA(req, nullptr, 0, nullptr, 0)) {
+			FILE *f = nullptr;
+			if (fopen_s(&f, dest.c_str(), "wb") == 0 && f) {
+				char buf[16384];
+				DWORD n = 0;
+				size_t total = 0;
+				while (InternetReadFile(req, buf, sizeof(buf), &n) && n > 0) {
+					fwrite(buf, 1, n, f);
+					total += n;
+				}
+				fclose(f);
+				ok = total > 500 * 1024; // un vrai installeur fait > 500 Ko
+			}
+		}
+		if (req)
+			InternetCloseHandle(req);
+		InternetCloseHandle(conn);
+	}
+	InternetCloseHandle(net);
+	return ok ? dest : std::string{};
+}
+
+/**
+ * « Mettre à jour maintenant » : télécharge l'installateur, le lance, puis
+ * ferme OBS proprement — la DLL du plugin est verrouillée tant qu'OBS tourne,
+ * l'installation ne peut aboutir qu'après sa fermeture.
+ */
+static void launch_update(QWidget *parent)
+{
+	QApplication::setOverrideCursor(Qt::WaitCursor);
+	const std::string exe = download_installer();
+	QApplication::restoreOverrideCursor();
+
+	if (exe.empty()) {
+		QMessageBox::warning(parent, QStringLiteral("VX.Stream"),
+				     QStringLiteral("Téléchargement impossible — récupérez la mise à jour "
+						    "sur valerix.stream/obs."));
+		QDesktopServices::openUrl(QUrl(QStringLiteral("https://valerix.stream/obs")));
+		return;
+	}
+
+	obs_log(LOG_INFO, "updater : installateur téléchargé (%s), fermeture d'OBS", exe.c_str());
+	ShellExecuteA(nullptr, "open", exe.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+
+	auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	if (window)
+		window->close(); // fermeture PROPRE (confirmation si un stream tourne)
+}
 #else
 static std::string http_get_version_body()
 {
 	return {}; // cible Windows — pas de check ailleurs
+}
+
+static void launch_update(QWidget *)
+{
+	QDesktopServices::openUrl(QUrl(QStringLiteral("https://valerix.stream/obs")));
 }
 #endif
 
@@ -188,11 +267,16 @@ void vx_updater_check(QMenu *menu)
 			menu,
 			[menu, remote, alreadyNotified] {
 				QAction *first = menu->actions().isEmpty() ? nullptr : menu->actions().first();
-				QAction *up = new QAction(QStringLiteral("⬆ Mise à jour disponible (v%1)…")
+				QAction *up = new QAction(QStringLiteral("⬆ Mettre à jour vers v%1 (auto)…")
 								  .arg(QString::fromStdString(remote)),
 							  menu);
-				QObject::connect(up, &QAction::triggered, [] {
-					QDesktopServices::openUrl(QUrl(QStringLiteral("https://valerix.stream/obs")));
+				QObject::connect(up, &QAction::triggered, [menu] {
+					if (QMessageBox::question(menu->parentWidget(), QStringLiteral("VX.Stream"),
+								  QStringLiteral(
+									  "Installer la mise à jour maintenant ?\n\n"
+									  "OBS va se fermer, l'installateur s'ouvre, "
+									  "puis relancez OBS.")) == QMessageBox::Yes)
+						launch_update(menu->parentWidget());
 				});
 				menu->insertAction(first, up);
 				menu->insertSeparator(first);
@@ -201,14 +285,17 @@ void vx_updater_check(QMenu *menu)
 					write_notified(remote);
 					// PLUGIN_VERSION est une variable extern (pas un littéral)
 					// → fromUtf8, pas QStringLiteral.
-					QMessageBox::information(menu->parentWidget(), QStringLiteral("VX.Stream"),
-								 QStringLiteral(
-									 "Une mise à jour de VX.Stream est disponible "
-									 "(v%1 → v%2).\n\nTéléchargez-la depuis "
-									 "valerix.stream/obs — ou via le menu "
-									 "VX.Stream → « Mise à jour disponible ».")
-									 .arg(QString::fromUtf8(PLUGIN_VERSION),
-									      QString::fromStdString(remote)));
+					const auto choice = QMessageBox::question(
+						menu->parentWidget(), QStringLiteral("VX.Stream"),
+						QStringLiteral("Une mise à jour de VX.Stream est disponible "
+							       "(v%1 → v%2).\n\nL'installer maintenant ? OBS se "
+							       "fermera, puis relancez-le. (Aussi disponible à "
+							       "tout moment via le menu VX.Stream.)")
+							.arg(QString::fromUtf8(PLUGIN_VERSION),
+							     QString::fromStdString(remote)),
+						QMessageBox::Yes | QMessageBox::No);
+					if (choice == QMessageBox::Yes)
+						launch_update(menu->parentWidget());
 				}
 			},
 			Qt::QueuedConnection);

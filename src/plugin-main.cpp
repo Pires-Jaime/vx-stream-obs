@@ -93,7 +93,7 @@ static void add_vx_menu(void)
 	QAction *ms = menu->addAction(QStringLiteral("Multistream…"));
 	QObject::connect(ms, &QAction::triggered, [] { vx_ms_show_dialog(); });
 
-	QAction *scenes = menu->addAction(QStringLiteral("Créer mes scènes Valerix…"));
+	QAction *scenes = menu->addAction(QStringLiteral("Ajouter mes overlays à la scène…"));
 	QObject::connect(scenes, &QAction::triggered, [] { vx_scenes_show_dialog(); });
 
 	menu->addSeparator();

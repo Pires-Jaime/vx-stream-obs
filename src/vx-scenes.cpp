@@ -62,7 +62,7 @@ class ScenesDialog : public QDialog {
 public:
 	explicit ScenesDialog(QWidget *parent) : QDialog(parent)
 	{
-		setWindowTitle(QStringLiteral("VX.Stream — Créer mes scènes"));
+		setWindowTitle(QStringLiteral("VX.Stream — Ajouter mes overlays"));
 		setMinimumSize(520, 460);
 
 		root = new QVBoxLayout(this);
@@ -81,7 +81,7 @@ public:
 		root->addLayout(listBox);
 
 		auto *btnRow = new QHBoxLayout();
-		createBtn = new QPushButton(QStringLiteral("Créer les scènes cochées"), this);
+		createBtn = new QPushButton(QStringLiteral("Ajouter à la scène actuelle"), this);
 		createBtn->setEnabled(false);
 		connect(createBtn, &QPushButton::clicked, this, &ScenesDialog::createScenes);
 		btnRow->addStretch(1);
@@ -153,22 +153,25 @@ private slots:
 	}
 
 private:
+	// Ajout à la SCÈNE COURANTE (retour G le Point) : le streamer a déjà ses
+	// scènes — l'overlay doit devenir une SOURCE dedans, pas une scène à part.
 	void createScenes()
 	{
+		obs_source_t *sceneSrc = obs_frontend_get_current_scene();
+		obs_scene_t *scene = sceneSrc ? obs_scene_from_source(sceneSrc) : nullptr;
+		if (!scene) {
+			if (sceneSrc)
+				obs_source_release(sceneSrc);
+			QMessageBox::warning(this, QStringLiteral("VX.Stream"),
+					     QStringLiteral("Aucune scène active dans OBS."));
+			return;
+		}
+
 		int created = 0;
 		for (auto &r : rows) {
 			if (!r.first->isChecked())
 				continue;
 			const OverlayInfo &ov = r.second;
-
-			const QString sceneName = QStringLiteral("VX — %1").arg(ov.name);
-			obs_scene_t *scene = obs_scene_create(sceneName.toUtf8().constData());
-			if (!scene) {
-				// Nom déjà pris (scène existante) → on ne double pas.
-				obs_log(LOG_WARNING, "scène « %s » non créée (existe déjà ?)",
-					sceneName.toUtf8().constData());
-				continue;
-			}
 
 			obs_data_t *ss = obs_data_create();
 			const QString url = QStringLiteral("https://valerix.stream/overlay/%1").arg(ov.token);
@@ -188,16 +191,14 @@ private:
 				obs_source_release(src);
 				created++;
 			}
-			// L'UI d'OBS a pris sa référence au signal de création.
-			obs_scene_release(scene);
 		}
+		obs_source_release(sceneSrc);
 
 		QMessageBox::information(this, QStringLiteral("VX.Stream"),
-					 created ? QStringLiteral("%1 scène%2 créée%2 — retrouvez-les dans la "
-								  "liste des scènes d'OBS.")
+					 created ? QStringLiteral("%1 source%2 ajoutée%2 à la scène actuelle.")
 							   .arg(created)
 							   .arg(created > 1 ? "s" : "")
-						 : QStringLiteral("Aucune scène créée."));
+						 : QStringLiteral("Aucune source ajoutée."));
 		if (created)
 			accept();
 	}

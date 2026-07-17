@@ -35,6 +35,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QUrl>
 
 #include "vx-docks.hpp"
+#include "vx-multistream-dialog.hpp"
+#include "vx-multistream.hpp"
 #include "vx-theme.hpp"
 
 OBS_DECLARE_MODULE()
@@ -86,6 +88,11 @@ static void add_vx_menu(void)
 
 	menu->addSeparator();
 
+	QAction *ms = menu->addAction(QStringLiteral("Multistream…"));
+	QObject::connect(ms, &QAction::triggered, [] { vx_ms_show_dialog(); });
+
+	menu->addSeparator();
+
 	QAction *docksCfg = menu->addAction(QStringLiteral("Configurer mes docks…"));
 	QObject::connect(docksCfg, &QAction::triggered, [] { open_url("https://valerix.stream/obs"); });
 
@@ -102,17 +109,30 @@ static void add_vx_menu(void)
 
 static void on_frontend_event(enum obs_frontend_event event, void *)
 {
+	switch (event) {
 	// FINISHED_LOADING : l'UI est construite. Ordre importe — les docks
 	// d'abord (le menu récupère leurs toggleViewAction).
-	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		vx_create_docks();
 		themeInstalled = vx_install_theme();
 		add_vx_menu();
+		break;
+	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+		vx_ms_on_streaming_started();
+		break;
+	// STOPPING (pas STOPPED) : nos sorties partagent les encodeurs du
+	// stream principal, elles doivent lâcher prise avant qu'il ne finisse.
+	case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
+		vx_ms_on_streaming_stopping();
+		break;
+	default:
+		break;
 	}
 }
 
 bool obs_module_load(void)
 {
+	vx_ms_load();
 	obs_frontend_add_event_callback(on_frontend_event, nullptr);
 	obs_log(LOG_INFO, "VX.Stream chargé (version %s)", PLUGIN_VERSION);
 	return true;
@@ -120,5 +140,6 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+	vx_ms_shutdown();
 	obs_log(LOG_INFO, "VX.Stream déchargé");
 }

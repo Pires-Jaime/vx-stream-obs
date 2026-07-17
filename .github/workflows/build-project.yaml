@@ -146,7 +146,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          cmake --build --preset macos-ci 2>&1 | tail -n 40 > buildtail.txt || true
+          cmake --build --preset macos-ci 2>&1 | grep -B 2 -A 6 -E 'error:|FAILED' | tail -n 60 > buildtail.txt || true
           while IFS= read -r line; do echo "::error::$line"; done < buildtail.txt
 
       - name: Package Plugin 📀

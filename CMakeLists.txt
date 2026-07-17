@@ -43,6 +43,7 @@ target_sources(
     src/vx-multistream.cpp
     src/vx-multistream-dialog.cpp
     src/vx-updater.cpp
+    src/vx-scenes.cpp
 )
 
 # browser-panel.hpp : interface QCef d'obs-browser (copie alignée sur le

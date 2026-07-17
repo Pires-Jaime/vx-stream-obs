@@ -47,6 +47,18 @@ bool vx_docks_available(void)
 	return cef != nullptr;
 }
 
+// Accès au CEF et au cookie store partagés (dialog Scènes : même session que
+// les docks — l'utilisateur connecté dans un dock l'est partout).
+QCef *vx_get_cef(void)
+{
+	return cef;
+}
+
+QCefCookieManager *vx_get_cookies(void)
+{
+	return cookies;
+}
+
 bool vx_create_docks(void)
 {
 	cef = obs_browser_init_panel();

@@ -37,6 +37,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "vx-docks.hpp"
 #include "vx-multistream-dialog.hpp"
 #include "vx-multistream.hpp"
+#include "vx-scenes.hpp"
 #include "vx-theme.hpp"
 #include "vx-updater.hpp"
 
@@ -92,6 +93,9 @@ static void add_vx_menu(void)
 	QAction *ms = menu->addAction(QStringLiteral("Multistream…"));
 	QObject::connect(ms, &QAction::triggered, [] { vx_ms_show_dialog(); });
 
+	QAction *scenes = menu->addAction(QStringLiteral("Créer mes scènes Valerix…"));
+	QObject::connect(scenes, &QAction::triggered, [] { vx_scenes_show_dialog(); });
+
 	menu->addSeparator();
 
 	QAction *docksCfg = menu->addAction(QStringLiteral("Configurer mes docks…"));
@@ -133,6 +137,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 	// modules — sinon crash garanti à chaque fermeture (cf. vx_destroy_docks).
 	case OBS_FRONTEND_EVENT_EXIT:
 		vx_ms_on_streaming_stopping();
+		vx_scenes_shutdown(); // contient un widget CEF — même règle que les docks
 		vx_destroy_docks();
 		break;
 	default:

@@ -14,6 +14,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
@@ -28,6 +29,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "vx-multistream.hpp"
 #include "vx-multistream-dialog.hpp"
+#include "vx-ms-dock.hpp"
+#include "vx-platform-logo.hpp"
 
 namespace {
 
@@ -35,15 +38,16 @@ namespace {
 // dashboard (Kick et TikTok fournissent une URL propre à chaque compte).
 struct Preset {
 	const char *label;
+	const char *platform; // id du logo (vx_platform_logo)
 	const char *server;
 	const char *hint;
 };
 const Preset PRESETS[] = {
-	{"YouTube", "rtmp://a.rtmp.youtube.com/live2", "Clé : YouTube Studio → Diffusion en direct"},
-	{"Kick", "", "Collez l'URL ET la clé depuis kick.com → Creator Dashboard → Stream key"},
-	{"TikTok", "", "Nécessite l'accès RTMP TikTok Live (URL + clé fournies par TikTok)"},
-	{"Twitch (2e compte)", "rtmp://live.twitch.tv/app", "Clé : dashboard Twitch → Stream"},
-	{"Autre (RTMP perso)", "", "Serveur RTMP quelconque"},
+	{"YouTube", "youtube", "rtmp://a.rtmp.youtube.com/live2", "Clé : YouTube Studio → Diffusion en direct"},
+	{"Kick", "kick", "", "Collez l'URL ET la clé depuis kick.com → Creator Dashboard → Stream key"},
+	{"TikTok", "tiktok", "", "Nécessite l'accès RTMP TikTok Live (URL + clé fournies par TikTok)"},
+	{"Twitch (2e compte)", "twitch", "rtmp://live.twitch.tv/app", "Clé : dashboard Twitch → Stream"},
+	{"Autre (RTMP perso)", "custom", "", "Serveur RTMP quelconque"},
 };
 
 class EditDialog : public QDialog {
@@ -59,7 +63,8 @@ public:
 
 		platform = new QComboBox(this);
 		for (const Preset &p : PRESETS)
-			platform->addItem(QString::fromUtf8(p.label));
+			platform->addItem(QIcon(vx_platform_logo(QString::fromUtf8(p.platform), 18)),
+					  QString::fromUtf8(p.label));
 		form->addRow(QStringLiteral("Plateforme"), platform);
 
 		hint = new QLabel(this);
@@ -80,9 +85,10 @@ public:
 		key->setPlaceholderText(QStringLiteral("Clé de stream"));
 		form->addRow(QStringLiteral("Clé"), key);
 
-		autoStart = new QCheckBox(QStringLiteral("Démarrer automatiquement avec le stream"), this);
-		autoStart->setChecked(t.autoStart);
-		form->addRow(QString(), autoStart);
+		enabled =
+			new QCheckBox(QStringLiteral("Diffuser sur cette destination (démarre avec le stream)"), this);
+		enabled->setChecked(t.enabled);
+		form->addRow(QString(), enabled);
 
 		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 		connect(buttons, &QDialogButtonBox::accepted, this, &EditDialog::validate);
@@ -93,7 +99,13 @@ public:
 		root->addWidget(buttons);
 
 		connect(platform, &QComboBox::currentIndexChanged, this, &EditDialog::applyPreset);
-		applyPreset(0);
+		// En édition : présélectionner la plateforme de la cible.
+		int startIdx = 0;
+		for (int i = 0; i < (int)(sizeof(PRESETS) / sizeof(PRESETS[0])); i++)
+			if (t.platform == PRESETS[i].platform)
+				startIdx = i;
+		platform->setCurrentIndex(startIdx);
+		applyPreset(startIdx);
 		// En édition on garde les valeurs existantes.
 		if (!t.name.empty())
 			name->setText(QString::fromStdString(t.name));
@@ -107,7 +119,7 @@ private:
 	QLineEdit *name;
 	QLineEdit *server;
 	QLineEdit *key;
-	QCheckBox *autoStart;
+	QCheckBox *enabled;
 
 	void applyPreset(int idx)
 	{
@@ -131,9 +143,13 @@ private:
 		target.name = name->text().trimmed().toStdString();
 		if (target.name.empty())
 			target.name = "Destination";
+		const int idx = platform->currentIndex();
+		target.platform = (idx >= 0 && idx < (int)(sizeof(PRESETS) / sizeof(PRESETS[0])))
+					  ? PRESETS[idx].platform
+					  : "custom";
 		target.server = server->text().trimmed().toStdString();
 		target.key = key->text().trimmed().toStdString();
-		target.autoStart = autoStart->isChecked();
+		target.enabled = enabled->isChecked();
 		if (target.id.empty())
 			target.id = std::to_string((long long)time(nullptr));
 		accept();
@@ -149,7 +165,7 @@ public:
 
 		table = new QTableWidget(0, 4, this);
 		table->setHorizontalHeaderLabels({QStringLiteral("Nom"), QStringLiteral("Serveur"),
-						  QStringLiteral("Auto"), QStringLiteral("État")});
+						  QStringLiteral("Actif"), QStringLiteral("État")});
 		table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
 		table->setSelectionBehavior(QAbstractItemView::SelectRows);
 		table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -180,6 +196,7 @@ public:
 			    QMessageBox::Yes) {
 				vx_ms_remove(id);
 				refresh();
+				vx_ms_dock_refresh();
 			}
 		});
 		connect(startBtn, &QPushButton::clicked, this, [this] {
@@ -234,9 +251,10 @@ public:
 		for (const VxTarget &t : ts) {
 			auto *n = new QTableWidgetItem(QString::fromStdString(t.name));
 			n->setData(Qt::UserRole, QString::fromStdString(t.id));
+			n->setIcon(QIcon(vx_platform_logo(QString::fromStdString(t.platform), 18)));
 			table->setItem(row, 0, n);
 			table->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(t.server)));
-			table->setItem(row, 2, new QTableWidgetItem(t.autoStart ? QStringLiteral("✓") : QString()));
+			table->setItem(row, 2, new QTableWidgetItem(t.enabled ? QStringLiteral("✓") : QString()));
 			table->setItem(row, 3, new QTableWidgetItem(QString()));
 			row++;
 		}
@@ -281,6 +299,7 @@ private:
 		if (d.exec() == QDialog::Accepted) {
 			vx_ms_upsert(d.target);
 			refresh();
+			vx_ms_dock_refresh();
 		}
 	}
 };

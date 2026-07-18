@@ -20,6 +20,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <util/platform.h>
 
 #include <algorithm>
+#include <cctype>
 #include <mutex>
 
 #include "vx-multistream.hpp"
@@ -56,9 +57,10 @@ void save_locked()
 		obs_data_t *o = obs_data_create();
 		obs_data_set_string(o, "id", t.id.c_str());
 		obs_data_set_string(o, "name", t.name.c_str());
+		obs_data_set_string(o, "platform", t.platform.c_str());
 		obs_data_set_string(o, "server", t.server.c_str());
 		obs_data_set_string(o, "key", t.key.c_str());
-		obs_data_set_bool(o, "auto_start", t.autoStart);
+		obs_data_set_bool(o, "enabled", t.enabled);
 		obs_data_array_push_back(arr, o);
 		obs_data_release(o);
 	}
@@ -115,9 +117,34 @@ void vx_ms_load(void)
 		VxTarget t;
 		t.id = obs_data_get_string(o, "id");
 		t.name = obs_data_get_string(o, "name");
+		t.platform = obs_data_get_string(o, "platform");
 		t.server = obs_data_get_string(o, "server");
 		t.key = obs_data_get_string(o, "key");
-		t.autoStart = obs_data_get_bool(o, "auto_start");
+		// Migration <0.8.0 : « enabled » remplace « auto_start » (défaut true).
+		obs_data_set_default_bool(o, "enabled",
+					  obs_data_has_user_value(o, "auto_start") ? obs_data_get_bool(o, "auto_start")
+										   : true);
+		t.enabled = obs_data_get_bool(o, "enabled");
+		// Migration : les cibles d'avant 0.8.0 n'ont pas de plateforme → on la
+		// devine du serveur/nom pour afficher le bon logo.
+		if (t.platform.empty()) {
+			auto has = [](const std::string &s, const char *needle) {
+				std::string low = s;
+				std::transform(low.begin(), low.end(), low.begin(),
+					       [](unsigned char c) { return (char)std::tolower(c); });
+				return low.find(needle) != std::string::npos;
+			};
+			if (has(t.server, "youtube") || has(t.name, "youtube"))
+				t.platform = "youtube";
+			else if (has(t.server, "twitch") || has(t.name, "twitch"))
+				t.platform = "twitch";
+			else if (has(t.name, "kick") || has(t.server, "kick"))
+				t.platform = "kick";
+			else if (has(t.name, "tiktok") || has(t.server, "tiktok"))
+				t.platform = "tiktok";
+			else
+				t.platform = "custom";
+		}
 		if (!t.id.empty())
 			targets.push_back(std::move(t));
 		obs_data_release(o);
@@ -240,6 +267,34 @@ bool vx_ms_start(const std::string &id, std::string *whyNot)
 	return true;
 }
 
+void vx_ms_set_enabled(const std::string &id, bool on)
+{
+	{
+		std::lock_guard<std::mutex> lock(mtx);
+		bool found = false;
+		for (VxTarget &t : targets) {
+			if (t.id == id) {
+				t.enabled = on;
+				found = true;
+			}
+		}
+		if (!found)
+			return;
+		save_locked();
+	}
+	// Bascule à chaud, HORS verrou (vx_ms_start/stop le reprennent) : si le
+	// stream principal tourne, le toggle agit tout de suite.
+	if (!obs_frontend_streaming_active())
+		return;
+	if (on) {
+		std::string why;
+		if (!vx_ms_start(id, &why))
+			obs_log(LOG_WARNING, "multistream toggle : %s → %s", id.c_str(), why.c_str());
+	} else {
+		vx_ms_stop(id);
+	}
+}
+
 void vx_ms_stop(const std::string &id)
 {
 	std::lock_guard<std::mutex> lock(mtx);
@@ -260,7 +315,7 @@ void vx_ms_on_streaming_started(void)
 	{
 		std::lock_guard<std::mutex> lock(mtx);
 		for (const VxTarget &t : targets)
-			if (t.autoStart)
+			if (t.enabled)
 				ids.push_back(t.id);
 	}
 	for (const std::string &id : ids) {

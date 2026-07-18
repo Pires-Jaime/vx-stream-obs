@@ -35,6 +35,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QUrl>
 
 #include "vx-docks.hpp"
+#include "vx-ms-dock.hpp"
 #include "vx-multistream-dialog.hpp"
 #include "vx-multistream.hpp"
 #include "vx-scenes.hpp"
@@ -74,6 +75,12 @@ static void add_vx_menu(void)
 		QAction *warn = menu->addAction(QStringLiteral("⚠ Docks indisponibles (obs-browser manquant)"));
 		warn->setEnabled(false);
 	}
+
+	// Le dock Multistream est un widget Qt natif : même mécanique de toggle
+	// (vx_dock_toggle_action retrouve n'importe quel QDockWidget par son id).
+	QAction *msDock = vx_dock_toggle_action("vx_multistream");
+	if (msDock)
+		menu->addAction(msDock);
 
 	menu->addSeparator();
 
@@ -122,6 +129,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 	// d'abord (le menu récupère leurs toggleViewAction).
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		vx_create_docks();
+		vx_ms_dock_create(); // avant le menu : il récupère son toggleViewAction
 		themeInstalled = vx_install_theme();
 		add_vx_menu();
 		break;
@@ -138,6 +146,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_EXIT:
 		vx_ms_on_streaming_stopping();
 		vx_scenes_shutdown(); // contient un widget CEF — même règle que les docks
+		vx_ms_dock_destroy();
 		vx_destroy_docks();
 		break;
 	default:

@@ -42,6 +42,8 @@ target_sources(
     src/vx-theme.cpp
     src/vx-multistream.cpp
     src/vx-multistream-dialog.cpp
+    src/vx-ms-dock.cpp
+    src/vx-platform-logo.cpp
     src/vx-updater.cpp
     src/vx-scenes.cpp
 )

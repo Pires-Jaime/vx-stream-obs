@@ -46,6 +46,8 @@ target_sources(
     src/vx-platform-logo.cpp
     src/vx-updater.cpp
     src/vx-scenes.cpp
+    src/vx-vertical.cpp
+    src/vx-vertical-dock.cpp
 )
 
 # browser-panel.hpp : interface QCef d'obs-browser (copie alignée sur le

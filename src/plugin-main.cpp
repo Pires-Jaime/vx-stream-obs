@@ -41,6 +41,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "vx-scenes.hpp"
 #include "vx-theme.hpp"
 #include "vx-updater.hpp"
+#include "vx-vertical.hpp"
+#include "vx-vertical-dock.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -76,11 +78,14 @@ static void add_vx_menu(void)
 		warn->setEnabled(false);
 	}
 
-	// Le dock Multistream est un widget Qt natif : même mécanique de toggle
-	// (vx_dock_toggle_action retrouve n'importe quel QDockWidget par son id).
+	// Docks Qt natifs : même mécanique de toggle (vx_dock_toggle_action
+	// retrouve n'importe quel QDockWidget par son id).
 	QAction *msDock = vx_dock_toggle_action("vx_multistream");
 	if (msDock)
 		menu->addAction(msDock);
+	QAction *vertDock = vx_dock_toggle_action("vx_vertical");
+	if (vertDock)
+		menu->addAction(vertDock);
 
 	menu->addSeparator();
 
@@ -130,16 +135,20 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		vx_create_docks();
 		vx_ms_dock_create(); // avant le menu : il récupère son toggleViewAction
+		vx_vert_init();      // le canvas AVANT son dock (l'aperçu le référence)
+		vx_vert_dock_create();
 		themeInstalled = vx_install_theme();
 		add_vx_menu();
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		vx_ms_on_streaming_started();
+		vx_vert_on_stream(true);
 		break;
 	// STOPPING (pas STOPPED) : nos sorties partagent les encodeurs du
 	// stream principal, elles doivent lâcher prise avant qu'il ne finisse.
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
 		vx_ms_on_streaming_stopping();
+		vx_vert_on_stream(false);
 		break;
 	// EXIT : détruire les docks CEF MAINTENANT, avant le déchargement des
 	// modules — sinon crash garanti à chaque fermeture (cf. vx_destroy_docks).
@@ -147,6 +156,8 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		vx_ms_on_streaming_stopping();
 		vx_scenes_shutdown(); // contient un widget CEF — même règle que les docks
 		vx_ms_dock_destroy();
+		vx_vert_dock_destroy(); // détruit l'obs_display AVANT de libérer le canvas
+		vx_vert_shutdown();
 		vx_destroy_docks();
 		break;
 	default:

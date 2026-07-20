@@ -21,9 +21,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <mutex>
 
 #include "vx-multistream.hpp"
+#include "vx-vertical.hpp"
 
 namespace {
 
@@ -35,6 +37,43 @@ struct Live {
 std::mutex mtx;
 std::vector<VxTarget> targets;
 std::vector<std::pair<std::string, Live>> lives; // id → sorties actives
+// Encodeur vidéo du canvas VERTICAL, PARTAGÉ par toutes les destinations 9:16
+// (un seul encodage pour TikTok + YouTube vertical + …). Créé à la volée quand
+// une cible verticale démarre, libéré à l'arrêt du stream. L'audio, lui, reste
+// celui du stream principal (partagé aussi côté horizontal).
+obs_encoder_t *vertVenc = nullptr;
+
+void release_vert_encoder()
+{
+	if (vertVenc) {
+		obs_encoder_release(vertVenc);
+		vertVenc = nullptr;
+	}
+}
+
+// Encodeur vidéo pour le canvas vertical : cloné du principal (NVENC reste
+// NVENC, mêmes réglages) mais branché sur la vidéo du canvas 9:16. Nullptr si
+// le canvas vertical n'est pas prêt. Réutilisé entre destinations verticales.
+obs_encoder_t *vertical_video_encoder(obs_encoder_t *mainV)
+{
+	if (vertVenc)
+		return vertVenc;
+	obs_canvas_t *canvas = vx_vert_canvas();
+	if (!canvas || !obs_canvas_has_video(canvas))
+		return nullptr;
+	const char *vid = mainV ? obs_encoder_get_id(mainV) : "obs_x264";
+	obs_data_t *vs = mainV ? obs_encoder_get_settings(mainV) : obs_data_create();
+	vertVenc = obs_video_encoder_create(vid, "vx_ms_vert_venc", vs, nullptr);
+	obs_data_release(vs);
+	if (!vertVenc && strcmp(vid, "obs_x264") != 0) {
+		obs_data_t *fb = obs_data_create();
+		vertVenc = obs_video_encoder_create("obs_x264", "vx_ms_vert_venc", fb, nullptr);
+		obs_data_release(fb);
+	}
+	if (vertVenc)
+		obs_encoder_set_video(vertVenc, obs_canvas_get_video(canvas));
+	return vertVenc;
+}
 
 std::string config_file()
 {
@@ -60,6 +99,7 @@ void save_locked()
 		obs_data_set_string(o, "platform", t.platform.c_str());
 		obs_data_set_string(o, "server", t.server.c_str());
 		obs_data_set_string(o, "key", t.key.c_str());
+		obs_data_set_string(o, "canvas", t.canvas.c_str());
 		obs_data_set_bool(o, "enabled", t.enabled);
 		obs_data_array_push_back(arr, o);
 		obs_data_release(o);
@@ -125,6 +165,11 @@ void vx_ms_load(void)
 					  obs_data_has_user_value(o, "auto_start") ? obs_data_get_bool(o, "auto_start")
 										   : true);
 		t.enabled = obs_data_get_bool(o, "enabled");
+		// Canvas (défaut horizontal ; absent sur les configs d'avant 0.10.0).
+		obs_data_set_default_string(o, "canvas", "horizontal");
+		t.canvas = obs_data_get_string(o, "canvas");
+		if (t.canvas != "vertical")
+			t.canvas = "horizontal";
 		// Migration : les cibles d'avant 0.8.0 n'ont pas de plateforme → on la
 		// devine du serveur/nom pour afficher le bon logo.
 		if (t.platform.empty()) {
@@ -220,12 +265,18 @@ bool vx_ms_start(const std::string &id, std::string *whyNot)
 			*whyNot = "sortie principale introuvable";
 		return false;
 	}
-	obs_encoder_t *venc = obs_output_get_video_encoder(main);
+	obs_encoder_t *mainV = obs_output_get_video_encoder(main);
 	obs_encoder_t *aenc = obs_output_get_audio_encoder(main, 0);
 	obs_output_release(main);
+
+	// Choix de la source vidéo : image du stream principal (horizontal) ou
+	// canvas 9:16 (vertical). L'audio est partagé dans les deux cas.
+	obs_encoder_t *venc = vx_target_is_vertical(*t) ? vertical_video_encoder(mainV) : mainV;
 	if (!venc || !aenc) {
 		if (whyNot)
-			*whyNot = "encodeurs du stream principal indisponibles";
+			*whyNot = vx_target_is_vertical(*t)
+					  ? "canvas vertical indisponible (ouvrez le dock VX Vertical)"
+					  : "encodeurs du stream principal indisponibles";
 		return false;
 	}
 
@@ -335,6 +386,9 @@ void vx_ms_on_streaming_stopping(void)
 		ids.push_back(p.first);
 	for (const std::string &id : ids)
 		stop_locked(id);
+	// L'encodeur vertical référence la vidéo du canvas : le libérer AVANT que
+	// le canvas ne soit détruit (EXIT) et pour ne pas retenir le GPU hors live.
+	release_vert_encoder();
 }
 
 void vx_ms_shutdown(void)

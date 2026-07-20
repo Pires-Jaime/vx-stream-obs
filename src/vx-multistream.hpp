@@ -13,10 +13,18 @@ struct VxTarget {
 	std::string platform; // youtube | kick | tiktok | twitch | custom (→ logo)
 	std::string server;   // rtmp(s)://…
 	std::string key;      // clé de stream
+	// Canvas source de cette destination : "horizontal" (Desktop, image du stream
+	// principal) ou "vertical" (9:16, canvas VX Vertical). TikTok → vertical.
+	std::string canvas = "horizontal";
 	// L'interrupteur de la plateforme : coché = elle diffuse (démarre avec le
 	// stream principal, et bascule à chaud si on le change en cours de live).
 	bool enabled = true;
 };
+
+inline bool vx_target_is_vertical(const VxTarget &t)
+{
+	return t.canvas == "vertical";
+}
 
 /** Charge les cibles depuis la config du module (appel au chargement). */
 void vx_ms_load(void);

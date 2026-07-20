@@ -85,6 +85,14 @@ public:
 		key->setPlaceholderText(QStringLiteral("Clé de stream"));
 		form->addRow(QStringLiteral("Clé"), key);
 
+		// Format d'image envoyé : Desktop (16:9, image du stream principal) ou
+		// Vertical (9:16, canvas VX Vertical — pour TikTok, Shorts, Reels…).
+		canvas = new QComboBox(this);
+		canvas->addItem(QStringLiteral("🖥  Desktop (16:9)"), QStringLiteral("horizontal"));
+		canvas->addItem(QStringLiteral("📱  Vertical (9:16)"), QStringLiteral("vertical"));
+		canvas->setCurrentIndex(t.canvas == "vertical" ? 1 : 0);
+		form->addRow(QStringLiteral("Format"), canvas);
+
 		enabled =
 			new QCheckBox(QStringLiteral("Diffuser sur cette destination (démarre avec le stream)"), this);
 		enabled->setChecked(t.enabled);
@@ -119,6 +127,7 @@ private:
 	QLineEdit *name;
 	QLineEdit *server;
 	QLineEdit *key;
+	QComboBox *canvas;
 	QCheckBox *enabled;
 
 	void applyPreset(int idx)
@@ -131,6 +140,10 @@ private:
 			name->setText(QString::fromUtf8(p.label));
 		if (*p.server)
 			server->setText(QString::fromUtf8(p.server));
+		// TikTok ne diffuse qu'en vertical : on le présélectionne pour éviter
+		// l'erreur classique (envoyer du 16:9 sur une plateforme 9:16).
+		if (std::string(p.platform) == "tiktok")
+			canvas->setCurrentIndex(1);
 	}
 
 	void validate()
@@ -149,6 +162,7 @@ private:
 					  : "custom";
 		target.server = server->text().trimmed().toStdString();
 		target.key = key->text().trimmed().toStdString();
+		target.canvas = canvas->currentData().toString().toStdString();
 		target.enabled = enabled->isChecked();
 		if (target.id.empty())
 			target.id = std::to_string((long long)time(nullptr));

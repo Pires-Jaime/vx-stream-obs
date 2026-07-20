@@ -16,8 +16,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
 
-#include <QCheckBox>
+#include <QAbstractButton>
 #include <QFrame>
+#include <QPaintEvent>
+#include <QPainter>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -36,6 +38,35 @@ SPDX-License-Identifier: GPL-2.0-or-later
 namespace {
 
 constexpr const char *DOCK_ID = "vx_multistream";
+
+// Interrupteur peint (Qt n'a pas de « switch » natif) : piste arrondie + pastille
+// qui glisse. Réutilise le signal `toggled` de QAbstractButton (aucun nouveau
+// membre méta → pas de Q_OBJECT nécessaire).
+class ToggleSwitch : public QAbstractButton {
+public:
+	explicit ToggleSwitch(QWidget *parent = nullptr) : QAbstractButton(parent)
+	{
+		setCheckable(true);
+		setCursor(Qt::PointingHandCursor);
+		setFixedSize(38, 20);
+	}
+	QSize sizeHint() const override { return QSize(38, 20); }
+
+protected:
+	void paintEvent(QPaintEvent *) override
+	{
+		QPainter p(this);
+		p.setRenderHint(QPainter::Antialiasing);
+		const bool on = isChecked();
+		p.setPen(Qt::NoPen);
+		p.setBrush(on ? QColor("#7c3aed") : QColor("#3a3a44"));
+		const int r = height() / 2;
+		p.drawRoundedRect(rect(), r, r);
+		p.setBrush(Qt::white);
+		const int d = height() - 4;
+		p.drawEllipse(on ? width() - d - 2 : 2, 2, d, d);
+	}
+};
 
 class MsDockWidget : public QWidget {
 public:
@@ -78,7 +109,8 @@ public:
 		// rebuild toutes les 2 s ferait clignoter les toggles sous la souris.
 		std::string sig;
 		for (const VxTarget &t : ts)
-			sig += t.id + '|' + t.name + '|' + t.platform + '|' + (t.enabled ? '1' : '0') + ';';
+			sig += t.id + '|' + t.name + '|' + t.platform + '|' + t.canvas + '|' + (t.enabled ? '1' : '0') +
+			       ';';
 		if (sig != lastSig) {
 			lastSig = sig;
 			rebuild(ts);
@@ -90,7 +122,7 @@ private:
 	struct Row {
 		std::string id;
 		QLabel *status = nullptr;
-		QCheckBox *toggle = nullptr;
+		ToggleSwitch *toggle = nullptr;
 	};
 
 	QWidget *listHost = nullptr;
@@ -145,20 +177,31 @@ private:
 
 			auto *col = new QVBoxLayout();
 			col->setSpacing(0);
+			// Nom + badge de format (📱 vertical / 🖥 desktop) sur la même ligne.
+			auto *nameRow = new QHBoxLayout();
+			nameRow->setSpacing(5);
 			auto *name = new QLabel(QString::fromStdString(t.name), card);
 			name->setStyleSheet(QStringLiteral("font-weight: 600; font-size: 12px;"));
+			const bool vertical = vx_target_is_vertical(t);
+			auto *badge =
+				new QLabel(vertical ? QStringLiteral("📱 9:16") : QStringLiteral("🖥 16:9"), card);
+			badge->setToolTip(vertical ? QStringLiteral("Diffuse le canvas vertical (VX Vertical)")
+						   : QStringLiteral("Diffuse l'image du stream principal"));
+			badge->setStyleSheet(QStringLiteral("color: #9a8cc7; font-size: 9px; font-weight: 700;"));
+			nameRow->addWidget(name);
+			nameRow->addWidget(badge);
+			nameRow->addStretch(1);
 			auto *status = new QLabel(card);
 			status->setStyleSheet(QStringLiteral("color: #888; font-size: 10px;"));
-			col->addWidget(name);
+			col->addLayout(nameRow);
 			col->addWidget(status);
 			h->addLayout(col, 1);
 
-			auto *toggle = new QCheckBox(card);
+			auto *toggle = new ToggleSwitch(card);
 			toggle->setChecked(t.enabled);
 			toggle->setToolTip(QStringLiteral("Diffuser sur cette plateforme (bascule à chaud en live)"));
-			toggle->setCursor(Qt::PointingHandCursor);
 			const std::string id = t.id;
-			connect(toggle, &QCheckBox::toggled, this, [this, id](bool on) {
+			connect(toggle, &ToggleSwitch::toggled, this, [this, id](bool on) {
 				vx_ms_set_enabled(id, on);
 				refresh();
 			});

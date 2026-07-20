@@ -141,14 +141,14 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		add_vx_menu();
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+		// Démarre TOUTES les destinations activées (horizontales ET verticales :
+		// le canvas 9:16 est diffusé par les cibles Multistream marquées vertical).
 		vx_ms_on_streaming_started();
-		vx_vert_on_stream(true);
 		break;
 	// STOPPING (pas STOPPED) : nos sorties partagent les encodeurs du
 	// stream principal, elles doivent lâcher prise avant qu'il ne finisse.
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
 		vx_ms_on_streaming_stopping();
-		vx_vert_on_stream(false);
 		break;
 	// EXIT : détruire les docks CEF MAINTENANT, avant le déchargement des
 	// modules — sinon crash garanti à chaque fermeture (cf. vx_destroy_docks).

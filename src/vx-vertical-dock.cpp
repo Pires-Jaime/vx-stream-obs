@@ -17,7 +17,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
 
-#include <QCheckBox>
 #include <QComboBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -28,7 +27,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <QMenu>
 #include <QPushButton>
 #include <QResizeEvent>
-#include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -54,7 +52,7 @@ public:
 		setAttribute(Qt::WA_NativeWindow);
 		setAttribute(Qt::WA_PaintOnScreen);
 		setAttribute(Qt::WA_NoSystemBackground);
-		setMinimumHeight(240);
+		setMinimumHeight(160);
 	}
 
 	~VertPreview() override { destroyDisplay(); }
@@ -232,7 +230,7 @@ public:
 
 		// Sources de la scène.
 		list = new QListWidget(this);
-		list->setMaximumHeight(110);
+		list->setMaximumHeight(80);
 		root->addWidget(list);
 
 		auto *srcRow = new QHBoxLayout();
@@ -259,64 +257,17 @@ public:
 		srcRow->addWidget(fit);
 		root->addLayout(srcRow);
 
-		// Sortie RTMP verticale.
-		const VxVertSettings s = vx_vert_get_settings();
-		server = new QLineEdit(QString::fromStdString(s.server), this);
-		server->setPlaceholderText(QStringLiteral("rtmp(s)://… (TikTok Live, YouTube…)"));
-		key = new QLineEdit(QString::fromStdString(s.key), this);
-		key->setEchoMode(QLineEdit::Password);
-		key->setPlaceholderText(QStringLiteral("Clé de stream"));
-		root->addWidget(server);
-		root->addWidget(key);
-
-		auto *outRow = new QHBoxLayout();
-		bitrate = new QSpinBox(this);
-		bitrate->setRange(500, 20000);
-		bitrate->setSingleStep(500);
-		bitrate->setSuffix(QStringLiteral(" kbps"));
-		bitrate->setValue(s.bitrate);
-		autoStart = new QCheckBox(QStringLiteral("Diffuser avec le stream"), this);
-		autoStart->setChecked(s.enabled);
-		outRow->addWidget(bitrate);
-		outRow->addWidget(autoStart, 1);
-		root->addLayout(outRow);
-
-		auto *ctlRow = new QHBoxLayout();
-		status = new QLabel(this);
-		status->setStyleSheet(QStringLiteral("color: #888; font-size: 10px;"));
-		startBtn = new QPushButton(QStringLiteral("▶"), this);
-		startBtn->setFixedWidth(34);
-		startBtn->setToolTip(QStringLiteral("Démarrer la diffusion verticale"));
-		connect(startBtn, &QPushButton::clicked, this, [this] { onStart(); });
-		stopBtn = new QPushButton(QStringLiteral("⏹"), this);
-		stopBtn->setFixedWidth(34);
-		stopBtn->setToolTip(QStringLiteral("Arrêter la diffusion verticale"));
-		connect(stopBtn, &QPushButton::clicked, this, [] { vx_vert_stop(); });
-		ctlRow->addWidget(status, 1);
-		ctlRow->addWidget(startBtn);
-		ctlRow->addWidget(stopBtn);
-		root->addLayout(ctlRow);
-
-		// Persistance des réglages à chaque changement.
-		auto saveSettings = [this] {
-			VxVertSettings ns;
-			ns.server = server->text().trimmed().toStdString();
-			ns.key = key->text().trimmed().toStdString();
-			ns.bitrate = bitrate->value();
-			ns.enabled = autoStart->isChecked();
-			vx_vert_set_settings(ns);
-		};
-		connect(server, &QLineEdit::editingFinished, this, saveSettings);
-		connect(key, &QLineEdit::editingFinished, this, saveSettings);
-		connect(bitrate, &QSpinBox::valueChanged, this, saveSettings);
-		connect(autoStart, &QCheckBox::toggled, this, saveSettings);
-
-		auto *timer = new QTimer(this);
-		connect(timer, &QTimer::timeout, this, [this] { refreshStatus(); });
-		timer->start(2000);
+		// La diffusion du canvas vertical se règle dans VX Multistream : une note
+		// discrète le rappelle, ce dock ne sert qu'à composer et prévisualiser.
+		auto *hint = new QLabel(
+			QStringLiteral("La diffusion se règle dans <b>VX Multistream</b> : ajoutez une destination "
+				       "en choisissant le canvas <b>Vertical</b> (TikTok, YouTube vertical…)."),
+			this);
+		hint->setWordWrap(true);
+		hint->setStyleSheet(QStringLiteral("color: #888; font-size: 10px;"));
+		root->addWidget(hint);
 
 		refreshScenes();
-		refreshStatus();
 	}
 
 	void destroyPreview()
@@ -329,13 +280,6 @@ private:
 	VertPreview *preview = nullptr;
 	QComboBox *sceneCombo = nullptr;
 	QListWidget *list = nullptr;
-	QLineEdit *server = nullptr;
-	QLineEdit *key = nullptr;
-	QSpinBox *bitrate = nullptr;
-	QCheckBox *autoStart = nullptr;
-	QLabel *status = nullptr;
-	QPushButton *startBtn = nullptr;
-	QPushButton *stopBtn = nullptr;
 
 	void refreshScenes()
 	{
@@ -370,22 +314,6 @@ private:
 			obs_source_t *src = obs_sceneitem_get_source(item);
 			const char *n = src ? obs_source_get_name(src) : "?";
 			list->addItem(QString::fromUtf8(n ? n : "?"));
-		}
-	}
-
-	void refreshStatus()
-	{
-		if (vx_vert_active()) {
-			status->setText(QStringLiteral("🔴 Verticale en direct"));
-			status->setStyleSheet(QStringLiteral("color: #ef4444; font-size: 10px; font-weight: 600;"));
-		} else if (autoStart->isChecked()) {
-			status->setText(obs_frontend_streaming_active()
-						? QStringLiteral("Démarrage…")
-						: QStringLiteral("Prête — démarre avec le stream"));
-			status->setStyleSheet(QStringLiteral("color: #888; font-size: 10px;"));
-		} else {
-			status->setText(QStringLiteral("Sortie verticale désactivée"));
-			status->setStyleSheet(QStringLiteral("color: #777; font-size: 10px;"));
 		}
 	}
 
@@ -524,14 +452,6 @@ private:
 		if (row < (int)items.size())
 			apply_bounds(items[row], fill);
 		vx_vert_save();
-	}
-
-	void onStart()
-	{
-		std::string why;
-		if (!vx_vert_start(&why))
-			status->setText(QStringLiteral("⚠ %1").arg(QString::fromStdString(why)));
-		refreshStatus();
 	}
 };
 

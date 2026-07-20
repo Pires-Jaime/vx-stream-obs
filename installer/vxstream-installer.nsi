@@ -44,6 +44,51 @@ BrandingText "Valerix — valerix.stream"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "French"
 
+; ── Attente de la fermeture d'OBS ──────────────────────────────────────────────
+; Windows VERROUILLE la DLL d'un plugin tant qu'OBS l'a chargée : toute copie
+; par-dessus échoue. L'updater ferme OBS, mais sa fermeture prend plusieurs
+; secondes (sources, encodeurs, CEF) — sans cette attente l'installation partait
+; trop tôt, l'écrasement échouait et le plugin restait à l'ANCIENNE version
+; (symptôme : « j'ai mis à jour mais rien n'a changé »).
+;
+; Sonde du verrou : sur Windows on ne peut ni supprimer ni écraser une DLL
+; chargée. On tente donc de supprimer la DLL cible ; tant qu'elle résiste, OBS
+; la tient encore. Aucune dépendance à un plugin NSIS tiers.
+!define VX_DLL "$APPDATA\obs-studio\plugins\vx-stream\bin\64bit\vx-stream.dll"
+
+Function WaitForObsRelease
+  SetShellVarContext all
+  ; Rien d'installé encore → aucun verrou possible.
+  ${IfNot} ${FileExists} "${VX_DLL}"
+    Return
+  ${EndIf}
+
+  StrCpy $R1 0 ; tentatives depuis la dernière relance
+vx_wait_loop:
+  ClearErrors
+  Delete "${VX_DLL}"
+  ${IfNot} ${FileExists} "${VX_DLL}"
+    DetailPrint "OBS a libéré le plugin — installation possible."
+    Return
+  ${EndIf}
+
+  IntOp $R1 $R1 + 1
+  ${If} $R1 >= 20 ; ~10 s d'attente silencieuse
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
+      "OBS Studio est encore ouvert : le plugin ne peut pas être remplacé.$\r$\n$\r$\n\
+Fermez complètement OBS (vérifiez la zone de notification), puis cliquez Réessayer." \
+      IDRETRY vx_wait_retry
+    ; Annuler : mieux vaut s'arrêter que produire une « fausse » mise à jour.
+    MessageBox MB_ICONSTOP "Installation annulée — le plugin n'a pas été modifié."
+    Abort
+  vx_wait_retry:
+    StrCpy $R1 0
+  ${EndIf}
+
+  Sleep 500
+  Goto vx_wait_loop
+FunctionEnd
+
 ; ── Sections ───────────────────────────────────────────────────────────────────
 
 Section "OBS Studio (si absent)" SecObs
@@ -90,8 +135,20 @@ SectionEnd
 Section "Plugin VX.Stream" SecVx
   SectionIn RO ; c'est l'objet même de l'installateur
   SetShellVarContext all
+  ; OBS doit avoir relâché la DLL, sinon l'écrasement échoue en silence.
+  Call WaitForObsRelease
+  ; On veut une VRAIE erreur si la copie échoue, pas un « Ignorer » qui laisse
+  ; l'ancienne version en place en faisant croire que tout s'est bien passé.
+  SetOverwrite try
+  ClearErrors
   SetOutPath "$APPDATA\obs-studio\plugins"
   File /r "payload\vx\"
+  ${If} ${Errors}
+    MessageBox MB_ICONSTOP \
+      "Le plugin VX.Stream n'a PAS pu être remplacé (fichier verrouillé).$\r$\n\
+Fermez OBS Studio complètement puis relancez cet installateur."
+    Abort
+  ${EndIf}
   DetailPrint "Plugin VX.Stream installé."
 SectionEnd
 

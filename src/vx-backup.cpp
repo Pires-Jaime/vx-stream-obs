@@ -312,11 +312,22 @@ private:
 			return;
 		HttpResult r = http_request("GET", "/api/vx-backup/manifest", tok);
 		if (r.status == 401) {
-			setStatus(QStringLiteral("Code invalide — recopiez-le depuis valerix.stream/obs."), true);
+			// Cas vécu : le code a été régénéré côté site → celui d'OBS ne vaut
+			// plus rien. Les SAUVEGARDES, elles, restent liées au compte.
+			setStatus(QStringLiteral("Code invalide ou périmé. Recopiez celui affiché sur "
+						 "valerix.stream/obs — vos sauvegardes existantes seront "
+						 "retrouvées, rien n'est perdu."),
+				  true);
 			return;
 		}
-		if (!r.ok)
+		if (r.status == 403) {
+			setStatus(QStringLiteral("VX.Backup nécessite un abonnement Valerix (Light minimum)."), true);
 			return;
+		}
+		if (!r.ok) {
+			setStatus(QStringLiteral("Serveur injoignable (code %1).").arg(r.status), true);
+			return;
+		}
 		obs_data_t *root = obs_data_create_from_json(r.body.c_str());
 		if (!root)
 			return;
@@ -368,7 +379,12 @@ private:
 			setStatus(QStringLiteral("✓ Sauvegarde envoyée."));
 			refreshList();
 		} else if (r.status == 401) {
-			setStatus(QStringLiteral("Code invalide."), true);
+			setStatus(QStringLiteral("Code invalide ou périmé — recopiez celui de valerix.stream/obs."),
+				  true);
+		} else if (r.status == 403) {
+			setStatus(QStringLiteral("VX.Backup nécessite un abonnement Valerix (Light minimum)."), true);
+		} else if (r.status == 413) {
+			setStatus(QStringLiteral("Configuration trop volumineuse (max 25 Mo)."), true);
 		} else {
 			setStatus(QStringLiteral("Échec de l'envoi (code %1).").arg(r.status), true);
 		}

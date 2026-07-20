@@ -4,13 +4,16 @@ Copyright (C) 2026 Valerix (Jaime Pires) <support@valerix.stream>
 SPDX-License-Identifier: GPL-2.0-or-later
 */
 
-// Le dock du canvas vertical : l'APERÇU 9:16 EN DIRECT (le « visuel du canvas
-// mobile »), les scènes verticales, leurs sources (presets Remplir/Adapter —
-// pas de drag à la souris en v1), et la sortie RTMP dédiée.
+// Le dock du canvas vertical : un ÉDITEUR 9:16 complet — aperçu en direct,
+// scènes verticales, et manipulation des sources à la souris (sélection,
+// déplacement, 8 poignées de redimensionnement, magnétisme, clic droit).
+// La DIFFUSION, elle, se règle dans VX Multistream (destinations « vertical »).
 //
 // L'aperçu est un obs_display embarqué dans un QWidget à fenêtre NATIVE
 // (pattern des projecteurs OBS) : le draw callback tourne sur le thread
 // graphique et rend obs_render_canvas_texture dans un viewport letterboxé.
+// Le letterbox est publié dans des atomiques pour que les événements souris
+// (thread UI) puissent convertir px écran → coordonnées canvas.
 // Destruction : obs_display_destroy AVANT la libération du canvas (EXIT).
 
 #include <obs-module.h>

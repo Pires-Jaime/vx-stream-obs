@@ -25,12 +25,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <QWidget>
 
+#include <graphics/matrix4.h>
+
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -43,7 +48,42 @@ namespace {
 
 constexpr const char *DOCK_ID = "vx_vertical";
 
-// ── Aperçu : QWidget natif + obs_display ─────────────────────────────────────
+obs_scene_t *current_scene();
+
+// État partagé entre le thread graphique (draw) et le thread UI (souris).
+// Scalaires atomiques : le letterbox est écrit par draw, lu par la souris ;
+// la sélection l'inverse. Un décalage d'une frame est sans conséquence.
+std::atomic<int> s_vpX{0}, s_vpY{0}, s_vpW{1}, s_vpH{1}; // viewport en px physiques
+std::atomic<int> s_baseW{1080}, s_baseH{1920};
+std::atomic<long long> s_selectedId{0}; // obs_sceneitem id sélectionné (0 = aucun)
+
+// Boîte englobante d'un item en coordonnées CANVAS (via sa transformation box).
+struct Box {
+	float x0, y0, x1, y1;
+};
+bool sceneitem_box(obs_sceneitem_t *item, Box *out)
+{
+	matrix4 m;
+	obs_sceneitem_get_box_transform(item, &m);
+	float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+	const float pts[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+	for (auto &p : pts) {
+		vec3 v, r;
+		vec3_set(&v, p[0], p[1], 0.0f);
+		vec3_transform(&r, &v, &m);
+		minx = r.x < minx ? r.x : minx;
+		miny = r.y < miny ? r.y : miny;
+		maxx = r.x > maxx ? r.x : maxx;
+		maxy = r.y > maxy ? r.y : maxy;
+	}
+	out->x0 = minx;
+	out->y0 = miny;
+	out->x1 = maxx;
+	out->y1 = maxy;
+	return maxx > minx && maxy > miny;
+}
+
+// ── Aperçu INTERACTIF : QWidget natif + obs_display + souris ─────────────────
 
 class VertPreview : public QWidget {
 public:
@@ -53,6 +93,8 @@ public:
 		setAttribute(Qt::WA_PaintOnScreen);
 		setAttribute(Qt::WA_NoSystemBackground);
 		setMinimumHeight(160);
+		setMouseTracking(true);
+		setCursor(Qt::OpenHandCursor);
 	}
 
 	~VertPreview() override { destroyDisplay(); }
@@ -67,6 +109,9 @@ public:
 			display = nullptr;
 		}
 	}
+
+	// Sélection depuis la liste des sources (thread UI).
+	void selectExternally(long long id) { s_selectedId = id; }
 
 protected:
 	void showEvent(QShowEvent *e) override
@@ -84,8 +129,118 @@ protected:
 		}
 	}
 
+	// Coordonnées widget (logiques) → coordonnées canvas.
+	bool toCanvas(const QPointF &pos, float *cxOut, float *cyOut)
+	{
+		const int vw = s_vpW.load(), vh = s_vpH.load();
+		if (vw <= 1 || vh <= 1)
+			return false;
+		const qreal d = devicePixelRatioF();
+		const float px = (float)(pos.x() * d), py = (float)(pos.y() * d);
+		const float u = (px - s_vpX.load()) / vw, v = (py - s_vpY.load()) / vh;
+		if (u < 0 || u > 1 || v < 0 || v > 1)
+			return false;
+		*cxOut = u * s_baseW.load();
+		*cyOut = v * s_baseH.load();
+		return true;
+	}
+
+	void mousePressEvent(QMouseEvent *e) override
+	{
+		if (e->button() != Qt::LeftButton)
+			return;
+		float cx, cy;
+		if (!toCanvas(e->position(), &cx, &cy)) {
+			s_selectedId = 0;
+			return;
+		}
+		// Sélection du haut vers le bas (l'énumération va du fond vers l'avant).
+		obs_scene_t *scene = current_scene();
+		std::vector<obs_sceneitem_t *> items;
+		if (scene)
+			obs_scene_enum_items(
+				scene,
+				[](obs_scene_t *, obs_sceneitem_t *it, void *p) {
+					static_cast<std::vector<obs_sceneitem_t *> *>(p)->push_back(it);
+					return true;
+				},
+				&items);
+		obs_sceneitem_t *hit = nullptr;
+		for (auto rit = items.rbegin(); rit != items.rend(); ++rit) {
+			Box b;
+			if (sceneitem_box(*rit, &b) && cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1) {
+				hit = *rit;
+				break;
+			}
+		}
+		if (!hit) {
+			s_selectedId = 0;
+			return;
+		}
+		s_selectedId = (long long)obs_sceneitem_get_id(hit);
+		dragging = true;
+		dragItem = hit;
+		vec2 p;
+		obs_sceneitem_get_pos(hit, &p);
+		startPosX = p.x;
+		startPosY = p.y;
+		grabCx = cx;
+		grabCy = cy;
+		setCursor(Qt::ClosedHandCursor);
+	}
+
+	void mouseMoveEvent(QMouseEvent *e) override
+	{
+		if (!dragging || !dragItem)
+			return;
+		float cx, cy;
+		if (!toCanvas(e->position(), &cx, &cy))
+			return;
+		vec2 np;
+		np.x = startPosX + (cx - grabCx);
+		np.y = startPosY + (cy - grabCy);
+		obs_sceneitem_set_pos(dragItem, &np);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *) override
+	{
+		if (dragging) {
+			dragging = false;
+			dragItem = nullptr;
+			setCursor(Qt::OpenHandCursor);
+			vx_vert_save();
+		}
+	}
+
+	// Molette = redimensionner l'item sélectionné (autour de son centre).
+	void wheelEvent(QWheelEvent *e) override
+	{
+		const long long id = s_selectedId.load();
+		if (!id)
+			return;
+		obs_scene_t *scene = current_scene();
+		obs_sceneitem_t *item = scene ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
+		if (!item)
+			return;
+		const float factor = e->angleDelta().y() > 0 ? 1.08f : 1.0f / 1.08f;
+		obs_transform_info ti;
+		obs_sceneitem_get_info2(item, &ti);
+		if (ti.bounds_type != OBS_BOUNDS_NONE) {
+			ti.bounds.x *= factor;
+			ti.bounds.y *= factor;
+		} else {
+			ti.scale.x *= factor;
+			ti.scale.y *= factor;
+		}
+		obs_sceneitem_set_info2(item, &ti);
+		vx_vert_save();
+	}
+
 private:
 	obs_display_t *display = nullptr;
+	bool dragging = false;
+	obs_sceneitem_t *dragItem = nullptr; // valide uniquement le temps d'un drag
+	float startPosX = 0, startPosY = 0, grabCx = 0, grabCy = 0;
 
 	void ensureDisplay()
 	{
@@ -114,6 +269,42 @@ private:
 			obs_display_add_draw_callback(display, &VertPreview::draw, nullptr);
 	}
 
+	// Contour de sélection dessiné en coordonnées canvas (effet solide).
+	static void draw_selection(float cw, float ch)
+	{
+		const long long id = s_selectedId.load();
+		if (!id)
+			return;
+		obs_scene_t *scene = current_scene();
+		obs_sceneitem_t *item = scene ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
+		Box b;
+		if (!item || !sceneitem_box(item, &b))
+			return;
+		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+		gs_eparam_t *color = gs_effect_get_param_by_name(solid, "color");
+		struct vec4 c;
+		vec4_set(&c, 0.486f, 0.227f, 0.929f, 1.0f); // #7c3aed
+		gs_effect_set_vec4(color, &c);
+		const float t = 0.004f * cw; // épaisseur ~ proportionnelle
+		gs_technique_t *tech = gs_effect_get_technique(solid, "Solid");
+		gs_technique_begin(tech);
+		gs_technique_begin_pass(tech, 0);
+		auto rect = [](float x, float y, float w, float h) {
+			gs_matrix_push();
+			gs_matrix_translate3f(x, y, 0.0f);
+			gs_matrix_scale3f(w, h, 1.0f);
+			gs_draw_sprite(nullptr, 0, 1, 1);
+			gs_matrix_pop();
+		};
+		(void)ch;
+		rect(b.x0, b.y0, b.x1 - b.x0, t);     // haut
+		rect(b.x0, b.y1 - t, b.x1 - b.x0, t); // bas
+		rect(b.x0, b.y0, t, b.y1 - b.y0);     // gauche
+		rect(b.x1 - t, b.y0, t, b.y1 - b.y0); // droite
+		gs_technique_end_pass(tech);
+		gs_technique_end(tech);
+	}
+
 	static void draw(void *, uint32_t cx, uint32_t cy)
 	{
 		obs_canvas_t *canvas = vx_vert_canvas();
@@ -129,11 +320,20 @@ private:
 		const int vw = (int)(cw * scale), vh = (int)(ch * scale);
 		const int vx = ((int)cx - vw) / 2, vy = ((int)cy - vh) / 2;
 
+		// Publie le letterbox + résolution pour le mapping souris.
+		s_vpX = vx;
+		s_vpY = vy;
+		s_vpW = vw;
+		s_vpH = vh;
+		s_baseW = (int)ovi.base_width;
+		s_baseH = (int)ovi.base_height;
+
 		gs_viewport_push();
 		gs_projection_push();
 		gs_ortho(0.0f, cw, 0.0f, ch, -100.0f, 100.0f);
 		gs_set_viewport(vx, vy, vw, vh);
 		obs_render_canvas_texture(canvas);
+		draw_selection(cw, ch);
 		gs_projection_pop();
 		gs_viewport_pop();
 	}
@@ -231,6 +431,11 @@ public:
 		// Sources de la scène.
 		list = new QListWidget(this);
 		list->setMaximumHeight(80);
+		// Sélectionner dans la liste surligne la source dans l'aperçu.
+		connect(list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *it) {
+			if (preview && it)
+				preview->selectExternally(it->data(Qt::UserRole).toLongLong());
+		});
 		root->addWidget(list);
 
 		auto *srcRow = new QHBoxLayout();
@@ -313,7 +518,10 @@ private:
 		for (obs_sceneitem_t *item : scene_items(current_scene())) {
 			obs_source_t *src = obs_sceneitem_get_source(item);
 			const char *n = src ? obs_source_get_name(src) : "?";
-			list->addItem(QString::fromUtf8(n ? n : "?"));
+			auto *it = new QListWidgetItem(QString::fromUtf8(n ? n : "?"));
+			// L'id du sceneitem permet de sélectionner/surligner dans l'aperçu.
+			it->setData(Qt::UserRole, (qlonglong)obs_sceneitem_get_id(item));
+			list->addItem(it);
 		}
 	}
 

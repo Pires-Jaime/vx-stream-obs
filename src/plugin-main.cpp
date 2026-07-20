@@ -34,6 +34,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QDesktopServices>
 #include <QUrl>
 
+#include "vx-backup.hpp"
 #include "vx-docks.hpp"
 #include "vx-ms-dock.hpp"
 #include "vx-multistream-dialog.hpp"
@@ -107,6 +108,8 @@ static void add_vx_menu(void)
 
 	QAction *scenes = menu->addAction(QStringLiteral("Ajouter mes overlays à la scène…"));
 	QObject::connect(scenes, &QAction::triggered, [] { vx_scenes_show_dialog(); });
+
+	vx_backup_add_menu(menu);
 
 	menu->addSeparator();
 

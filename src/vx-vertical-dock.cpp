@@ -56,6 +56,8 @@ obs_scene_t *current_scene();
 std::atomic<int> s_vpX{0}, s_vpY{0}, s_vpW{1}, s_vpH{1}; // viewport en px physiques
 std::atomic<int> s_baseW{1080}, s_baseH{1920};
 std::atomic<long long> s_selectedId{0}; // obs_sceneitem id sélectionné (0 = aucun)
+// Guides de magnétisme actives (coordonnées canvas ; < 0 = aucune).
+std::atomic<float> s_snapV{-1.0f}, s_snapH{-1.0f};
 
 // Boîte englobante d'un item en coordonnées CANVAS (via sa transformation box).
 struct Box {
@@ -81,6 +83,25 @@ bool sceneitem_box(obs_sceneitem_t *item, Box *out)
 	out->x1 = maxx;
 	out->y1 = maxy;
 	return maxx > minx && maxy > miny;
+}
+
+// Applique une boîte englobante voulue à un item. Modèle unifié : on passe tout
+// le monde en « bounds » centrés — déplacer = changer pos, redimensionner =
+// changer bounds. Ça marche pour toutes les sources, quelle que soit leur
+// taille native, et c'est exactement ce que fait la boîte de délimitation d'OBS.
+void apply_aabb(obs_sceneitem_t *item, const Box &b)
+{
+	obs_transform_info ti;
+	obs_sceneitem_get_info2(item, &ti);
+	ti.pos.x = (b.x0 + b.x1) / 2;
+	ti.pos.y = (b.y0 + b.y1) / 2;
+	ti.alignment = OBS_ALIGN_CENTER;
+	ti.bounds_alignment = OBS_ALIGN_CENTER;
+	if (ti.bounds_type == OBS_BOUNDS_NONE)
+		ti.bounds_type = OBS_BOUNDS_SCALE_INNER; // conserve le ratio du contenu
+	ti.bounds.x = b.x1 - b.x0;
+	ti.bounds.y = b.y1 - b.y0;
+	obs_sceneitem_set_info2(item, &ti);
 }
 
 // ── Aperçu INTERACTIF : QWidget natif + obs_display + souris ─────────────────
@@ -138,11 +159,19 @@ protected:
 		const qreal d = devicePixelRatioF();
 		const float px = (float)(pos.x() * d), py = (float)(pos.y() * d);
 		const float u = (px - s_vpX.load()) / vw, v = (py - s_vpY.load()) / vh;
-		if (u < 0 || u > 1 || v < 0 || v > 1)
-			return false;
+		if (u < -0.2f || u > 1.2f || v < -0.2f || v > 1.2f)
+			return false; // un peu de marge : on garde le geste hors cadre
 		*cxOut = u * s_baseW.load();
 		*cyOut = v * s_baseH.load();
 		return true;
+	}
+
+	// Rayon de préhension d'une poignée, constant À L'ÉCRAN (converti en unités
+	// canvas) : sinon il rétrécirait quand l'aperçu est petit.
+	float grabRadius() const
+	{
+		const int vw = s_vpW.load();
+		return vw > 1 ? 10.0f * (float)s_baseW.load() / vw : 12.0f;
 	}
 
 	void mousePressEvent(QMouseEvent *e) override
@@ -150,26 +179,41 @@ protected:
 		if (e->button() != Qt::LeftButton)
 			return;
 		float cx, cy;
-		if (!toCanvas(e->position(), &cx, &cy)) {
-			s_selectedId = 0;
+		if (!toCanvas(e->position(), &cx, &cy))
 			return;
-		}
-		// Sélection du haut vers le bas (l'énumération va du fond vers l'avant).
+
 		obs_scene_t *scene = current_scene();
+		if (!scene)
+			return;
+
+		// 1) Une poignée de l'item déjà sélectionné a-t-elle été saisie ?
+		const long long sel = s_selectedId.load();
+		obs_sceneitem_t *selItem = sel ? obs_scene_find_sceneitem_by_id(scene, sel) : nullptr;
+		Box sb;
+		if (selItem && sceneitem_box(selItem, &sb)) {
+			const int h = handleAt(sb, cx, cy);
+			if (h >= 0) {
+				beginDrag(selItem, (DragMode)(Resize0 + h), sb, cx, cy);
+				return;
+			}
+		}
+
+		// 2) Sinon, sélection de l'item sous le curseur (du dessus vers le fond).
 		std::vector<obs_sceneitem_t *> items;
-		if (scene)
-			obs_scene_enum_items(
-				scene,
-				[](obs_scene_t *, obs_sceneitem_t *it, void *p) {
-					static_cast<std::vector<obs_sceneitem_t *> *>(p)->push_back(it);
-					return true;
-				},
-				&items);
+		obs_scene_enum_items(
+			scene,
+			[](obs_scene_t *, obs_sceneitem_t *it, void *p) {
+				static_cast<std::vector<obs_sceneitem_t *> *>(p)->push_back(it);
+				return true;
+			},
+			&items);
 		obs_sceneitem_t *hit = nullptr;
+		Box hb{};
 		for (auto rit = items.rbegin(); rit != items.rend(); ++rit) {
 			Box b;
 			if (sceneitem_box(*rit, &b) && cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1) {
 				hit = *rit;
+				hb = b;
 				break;
 			}
 		}
@@ -178,69 +222,240 @@ protected:
 			return;
 		}
 		s_selectedId = (long long)obs_sceneitem_get_id(hit);
-		dragging = true;
-		dragItem = hit;
-		vec2 p;
-		obs_sceneitem_get_pos(hit, &p);
-		startPosX = p.x;
-		startPosY = p.y;
-		grabCx = cx;
-		grabCy = cy;
-		setCursor(Qt::ClosedHandCursor);
+		beginDrag(hit, Move, hb, cx, cy);
 	}
 
 	void mouseMoveEvent(QMouseEvent *e) override
 	{
-		if (!dragging || !dragItem)
-			return;
 		float cx, cy;
 		if (!toCanvas(e->position(), &cx, &cy))
 			return;
-		vec2 np;
-		np.x = startPosX + (cx - grabCx);
-		np.y = startPosY + (cy - grabCy);
-		obs_sceneitem_set_pos(dragItem, &np);
+
+		// Curseur indicatif quand on survole une poignée (sans bouton pressé).
+		if (mode == None) {
+			updateHoverCursor(cx, cy);
+			return;
+		}
+		if (!dragItem)
+			return;
+
+		const float W = (float)s_baseW.load(), H = (float)s_baseH.load();
+		const float dx = cx - grabCx, dy = cy - grabCy;
+		Box b = startBox;
+		if (mode == Move) {
+			b.x0 += dx;
+			b.x1 += dx;
+			b.y0 += dy;
+			b.y1 += dy;
+			snapMove(&b, W, H);
+		} else {
+			// Redimensionnement : le bord/coin OPPOSÉ reste ancré.
+			const int h = mode - Resize0;
+			const bool left = (h == HTL || h == HL || h == HBL);
+			const bool right = (h == HTR || h == HR || h == HBR);
+			const bool top = (h == HTL || h == HT || h == HTR);
+			const bool bottom = (h == HBL || h == HB || h == HBR);
+			if (left)
+				b.x0 = startBox.x0 + dx;
+			if (right)
+				b.x1 = startBox.x1 + dx;
+			if (top)
+				b.y0 = startBox.y0 + dy;
+			if (bottom)
+				b.y1 = startBox.y1 + dy;
+			snapResize(&b, W, H, left, right, top, bottom);
+			// Taille minimale + bords non croisés.
+			if (b.x1 - b.x0 < 16.0f) {
+				if (left)
+					b.x0 = b.x1 - 16.0f;
+				else
+					b.x1 = b.x0 + 16.0f;
+			}
+			if (b.y1 - b.y0 < 16.0f) {
+				if (top)
+					b.y0 = b.y1 - 16.0f;
+				else
+					b.y1 = b.y0 + 16.0f;
+			}
+		}
+		apply_aabb(dragItem, b);
 	}
 
 	void mouseReleaseEvent(QMouseEvent *) override
 	{
-		if (dragging) {
-			dragging = false;
+		if (mode != None) {
+			mode = None;
 			dragItem = nullptr;
+			s_snapV = s_snapH = -1.0f;
 			setCursor(Qt::OpenHandCursor);
 			vx_vert_save();
 		}
 	}
 
-	// Molette = redimensionner l'item sélectionné (autour de son centre).
+	// Molette = redimensionner autour du centre (geste rapide, sans poignée).
 	void wheelEvent(QWheelEvent *e) override
 	{
 		const long long id = s_selectedId.load();
-		if (!id)
-			return;
 		obs_scene_t *scene = current_scene();
-		obs_sceneitem_t *item = scene ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
-		if (!item)
+		obs_sceneitem_t *item = (id && scene) ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
+		Box b;
+		if (!item || !sceneitem_box(item, &b))
 			return;
-		const float factor = e->angleDelta().y() > 0 ? 1.08f : 1.0f / 1.08f;
-		obs_transform_info ti;
-		obs_sceneitem_get_info2(item, &ti);
-		if (ti.bounds_type != OBS_BOUNDS_NONE) {
-			ti.bounds.x *= factor;
-			ti.bounds.y *= factor;
-		} else {
-			ti.scale.x *= factor;
-			ti.scale.y *= factor;
-		}
-		obs_sceneitem_set_info2(item, &ti);
+		const float f = e->angleDelta().y() > 0 ? 1.08f : 1.0f / 1.08f;
+		const float ccx = (b.x0 + b.x1) / 2, ccy = (b.y0 + b.y1) / 2;
+		const float hw = (b.x1 - b.x0) * f / 2, hh = (b.y1 - b.y0) * f / 2;
+		apply_aabb(item, Box{ccx - hw, ccy - hh, ccx + hw, ccy + hh});
 		vx_vert_save();
 	}
 
 private:
+	// Ordre des poignées : coins puis milieux de bords.
+	enum { HTL = 0, HT, HTR, HR, HBR, HB, HBL, HL, HCOUNT };
+	enum DragMode { None = 0, Move, Resize0 };
+
 	obs_display_t *display = nullptr;
-	bool dragging = false;
-	obs_sceneitem_t *dragItem = nullptr; // valide uniquement le temps d'un drag
-	float startPosX = 0, startPosY = 0, grabCx = 0, grabCy = 0;
+	DragMode mode = None;
+	obs_sceneitem_t *dragItem = nullptr; // valide uniquement le temps d'un geste
+	Box startBox{};
+	float grabCx = 0, grabCy = 0;
+
+	static void handlePoint(const Box &b, int h, float *x, float *y)
+	{
+		const float mx = (b.x0 + b.x1) / 2, my = (b.y0 + b.y1) / 2;
+		switch (h) {
+		case HTL:
+			*x = b.x0;
+			*y = b.y0;
+			break;
+		case HT:
+			*x = mx;
+			*y = b.y0;
+			break;
+		case HTR:
+			*x = b.x1;
+			*y = b.y0;
+			break;
+		case HR:
+			*x = b.x1;
+			*y = my;
+			break;
+		case HBR:
+			*x = b.x1;
+			*y = b.y1;
+			break;
+		case HB:
+			*x = mx;
+			*y = b.y1;
+			break;
+		case HBL:
+			*x = b.x0;
+			*y = b.y1;
+			break;
+		default:
+			*x = b.x0;
+			*y = my;
+			break;
+		}
+	}
+
+	int handleAt(const Box &b, float cx, float cy) const
+	{
+		const float r = grabRadius();
+		for (int h = 0; h < HCOUNT; h++) {
+			float hx, hy;
+			handlePoint(b, h, &hx, &hy);
+			if (cx >= hx - r && cx <= hx + r && cy >= hy - r && cy <= hy + r)
+				return h;
+		}
+		return -1;
+	}
+
+	void beginDrag(obs_sceneitem_t *item, DragMode m, const Box &b, float cx, float cy)
+	{
+		mode = m;
+		dragItem = item;
+		startBox = b;
+		grabCx = cx;
+		grabCy = cy;
+		setCursor(m == Move ? Qt::ClosedHandCursor : cursorForHandle(m - Resize0));
+	}
+
+	static Qt::CursorShape cursorForHandle(int h)
+	{
+		switch (h) {
+		case HTL:
+		case HBR:
+			return Qt::SizeFDiagCursor;
+		case HTR:
+		case HBL:
+			return Qt::SizeBDiagCursor;
+		case HT:
+		case HB:
+			return Qt::SizeVerCursor;
+		default:
+			return Qt::SizeHorCursor;
+		}
+	}
+
+	void updateHoverCursor(float cx, float cy)
+	{
+		obs_scene_t *scene = current_scene();
+		const long long sel = s_selectedId.load();
+		obs_sceneitem_t *item = (sel && scene) ? obs_scene_find_sceneitem_by_id(scene, sel) : nullptr;
+		Box b;
+		if (item && sceneitem_box(item, &b)) {
+			const int h = handleAt(b, cx, cy);
+			if (h >= 0) {
+				setCursor(cursorForHandle(h));
+				return;
+			}
+		}
+		setCursor(Qt::OpenHandCursor);
+	}
+
+	// Magnétisme : bords et centre du canvas. Publie la guide à dessiner.
+	static float snapTo(float v, const float *targets, int n, float tol, bool *snapped)
+	{
+		for (int i = 0; i < n; i++)
+			if (v > targets[i] - tol && v < targets[i] + tol) {
+				*snapped = true;
+				return targets[i];
+			}
+		return v;
+	}
+
+	void snapMove(Box *b, float W, float H)
+	{
+		const float tol = grabRadius() * 0.8f;
+		const float w = b->x1 - b->x0, h = b->y1 - b->y0;
+		const float tx[3] = {0.0f, W / 2 - w / 2, W - w};
+		const float ty[3] = {0.0f, H / 2 - h / 2, H - h};
+		bool sx = false, sy = false;
+		b->x0 = snapTo(b->x0, tx, 3, tol, &sx);
+		b->y0 = snapTo(b->y0, ty, 3, tol, &sy);
+		b->x1 = b->x0 + w;
+		b->y1 = b->y0 + h;
+		s_snapV = sx ? (b->x0 + b->x1) / 2 : -1.0f;
+		s_snapH = sy ? (b->y0 + b->y1) / 2 : -1.0f;
+	}
+
+	void snapResize(Box *b, float W, float H, bool left, bool right, bool top, bool bottom)
+	{
+		const float tol = grabRadius() * 0.8f;
+		const float tx[3] = {0.0f, W / 2, W};
+		const float ty[3] = {0.0f, H / 2, H};
+		bool sx = false, sy = false;
+		if (left)
+			b->x0 = snapTo(b->x0, tx, 3, tol, &sx);
+		if (right)
+			b->x1 = snapTo(b->x1, tx, 3, tol, &sx);
+		if (top)
+			b->y0 = snapTo(b->y0, ty, 3, tol, &sy);
+		if (bottom)
+			b->y1 = snapTo(b->y1, ty, 3, tol, &sy);
+		s_snapV = sx ? (left ? b->x0 : b->x1) : -1.0f;
+		s_snapH = sy ? (top ? b->y0 : b->y1) : -1.0f;
+	}
 
 	void ensureDisplay()
 	{
@@ -269,7 +484,7 @@ private:
 			obs_display_add_draw_callback(display, &VertPreview::draw, nullptr);
 	}
 
-	// Contour de sélection dessiné en coordonnées canvas (effet solide).
+	// Contour + 8 poignées + guides de magnétisme, en coordonnées canvas.
 	static void draw_selection(float cw, float ch)
 	{
 		const long long id = s_selectedId.load();
@@ -280,15 +495,15 @@ private:
 		Box b;
 		if (!item || !sceneitem_box(item, &b))
 			return;
+
 		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 		gs_eparam_t *color = gs_effect_get_param_by_name(solid, "color");
-		struct vec4 c;
-		vec4_set(&c, 0.486f, 0.227f, 0.929f, 1.0f); // #7c3aed
-		gs_effect_set_vec4(color, &c);
-		const float t = 0.004f * cw; // épaisseur ~ proportionnelle
 		gs_technique_t *tech = gs_effect_get_technique(solid, "Solid");
-		gs_technique_begin(tech);
-		gs_technique_begin_pass(tech, 0);
+		auto setColor = [&](float r, float g, float bl) {
+			struct vec4 c;
+			vec4_set(&c, r, g, bl, 1.0f);
+			gs_effect_set_vec4(color, &c);
+		};
 		auto rect = [](float x, float y, float w, float h) {
 			gs_matrix_push();
 			gs_matrix_translate3f(x, y, 0.0f);
@@ -296,11 +511,38 @@ private:
 			gs_draw_sprite(nullptr, 0, 1, 1);
 			gs_matrix_pop();
 		};
-		(void)ch;
-		rect(b.x0, b.y0, b.x1 - b.x0, t);     // haut
-		rect(b.x0, b.y1 - t, b.x1 - b.x0, t); // bas
-		rect(b.x0, b.y0, t, b.y1 - b.y0);     // gauche
-		rect(b.x1 - t, b.y0, t, b.y1 - b.y0); // droite
+
+		const int vw = s_vpW.load();
+		const float perPx = vw > 1 ? cw / vw : 2.0f; // 1 px écran en unités canvas
+		const float t = 2.0f * perPx;                // contour ~2 px à l'écran
+		const float hs = 5.0f * perPx;               // demi-côté d'une poignée
+
+		gs_technique_begin(tech);
+		gs_technique_begin_pass(tech, 0);
+
+		// Guides de magnétisme (jaune) sur toute la hauteur/largeur du canvas.
+		const float sv = s_snapV.load(), sh = s_snapH.load();
+		setColor(0.98f, 0.75f, 0.14f);
+		if (sv >= 0.0f)
+			rect(sv - t / 2, 0.0f, t, ch);
+		if (sh >= 0.0f)
+			rect(0.0f, sh - t / 2, cw, t);
+
+		// Contour de l'item.
+		setColor(0.486f, 0.227f, 0.929f); // #7c3aed
+		rect(b.x0, b.y0, b.x1 - b.x0, t);
+		rect(b.x0, b.y1 - t, b.x1 - b.x0, t);
+		rect(b.x0, b.y0, t, b.y1 - b.y0);
+		rect(b.x1 - t, b.y0, t, b.y1 - b.y0);
+
+		// Poignées (blanches, bien visibles sur n'importe quel fond).
+		setColor(1.0f, 1.0f, 1.0f);
+		const float mx = (b.x0 + b.x1) / 2, my = (b.y0 + b.y1) / 2;
+		const float hx[HCOUNT] = {b.x0, mx, b.x1, b.x1, b.x1, mx, b.x0, b.x0};
+		const float hy[HCOUNT] = {b.y0, b.y0, b.y0, my, b.y1, b.y1, b.y1, my};
+		for (int i = 0; i < HCOUNT; i++)
+			rect(hx[i] - hs, hy[i] - hs, hs * 2, hs * 2);
+
 		gs_technique_end_pass(tech);
 		gs_technique_end(tech);
 	}
@@ -431,6 +673,10 @@ public:
 		// Sources de la scène.
 		list = new QListWidget(this);
 		list->setMaximumHeight(80);
+		// Clic droit : renommer, ordre, visibilité, propriétés, supprimer.
+		list->setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(list, &QListWidget::customContextMenuRequested, this,
+			[this](const QPoint &p) { showSourceMenu(list->mapToGlobal(p)); });
 		// Sélectionner dans la liste surligne la source dans l'aperçu.
 		connect(list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *it) {
 			if (preview && it)
@@ -486,6 +732,108 @@ private:
 	QComboBox *sceneCombo = nullptr;
 	QListWidget *list = nullptr;
 
+	// Item de scène correspondant à la ligne sélectionnée dans la liste.
+	obs_sceneitem_t *selectedItem()
+	{
+		QListWidgetItem *it = list->currentItem();
+		if (!it)
+			return nullptr;
+		obs_scene_t *scene = current_scene();
+		if (!scene)
+			return nullptr;
+		return obs_scene_find_sceneitem_by_id(scene, it->data(Qt::UserRole).toLongLong());
+	}
+
+	void showSourceMenu(const QPoint &globalPos)
+	{
+		obs_sceneitem_t *item = selectedItem();
+		if (!item)
+			return;
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		QMenu m(this);
+
+		m.addAction(QStringLiteral("Renommer…"), [this, src] {
+			if (!src)
+				return;
+			bool ok = false;
+			const QString cur = QString::fromUtf8(obs_source_get_name(src));
+			const QString n = QInputDialog::getText(this, QStringLiteral("Renommer la source"),
+								QStringLiteral("Nom :"), QLineEdit::Normal, cur, &ok);
+			if (ok && !n.trimmed().isEmpty()) {
+				obs_source_set_name(src, n.trimmed().toUtf8().constData());
+				refreshItems();
+				vx_vert_save();
+			}
+		});
+
+		const bool visible = obs_sceneitem_visible(item);
+		m.addAction(visible ? QStringLiteral("Masquer") : QStringLiteral("Afficher"), [this, item, visible] {
+			obs_sceneitem_set_visible(item, !visible);
+			refreshItems();
+			vx_vert_save();
+		});
+		const bool locked = obs_sceneitem_locked(item);
+		m.addAction(locked ? QStringLiteral("Déverrouiller") : QStringLiteral("Verrouiller"),
+			    [this, item, locked] {
+				    obs_sceneitem_set_locked(item, !locked);
+				    refreshItems();
+				    vx_vert_save();
+			    });
+
+		m.addSeparator();
+		m.addAction(QStringLiteral("Monter d'un plan"), [this, item] {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_UP);
+			refreshItems();
+			vx_vert_save();
+		});
+		m.addAction(QStringLiteral("Descendre d'un plan"), [this, item] {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_DOWN);
+			refreshItems();
+			vx_vert_save();
+		});
+		m.addAction(QStringLiteral("Mettre au premier plan"), [this, item] {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
+			refreshItems();
+			vx_vert_save();
+		});
+		m.addAction(QStringLiteral("Mettre à l'arrière-plan"), [this, item] {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_BOTTOM);
+			refreshItems();
+			vx_vert_save();
+		});
+
+		m.addSeparator();
+		m.addAction(QStringLiteral("Remplir le cadre 9:16"), [this, item] {
+			apply_bounds(item, true);
+			vx_vert_save();
+		});
+		m.addAction(QStringLiteral("Adapter au cadre 9:16"), [this, item] {
+			apply_bounds(item, false);
+			vx_vert_save();
+		});
+		m.addAction(QStringLiteral("Centrer"), [this, item] {
+			Box b;
+			if (!sceneitem_box(item, &b))
+				return;
+			const float w = b.x1 - b.x0, h = b.y1 - b.y0;
+			const float cxm = 1080.0f / 2, cym = 1920.0f / 2;
+			apply_aabb(item, Box{cxm - w / 2, cym - h / 2, cxm + w / 2, cym + h / 2});
+			vx_vert_save();
+		});
+
+		// Propriétés / filtres : on réutilise les fenêtres natives d'OBS.
+		if (src) {
+			m.addSeparator();
+			m.addAction(QStringLiteral("Propriétés…"), [src] { obs_frontend_open_source_properties(src); });
+			m.addAction(QStringLiteral("Filtres…"), [src] { obs_frontend_open_source_filters(src); });
+		}
+
+		m.addSeparator();
+		m.addAction(QStringLiteral("Supprimer"), [this] { onRemoveSource(); });
+
+		m.exec(globalPos);
+	}
+
 	void refreshScenes()
 	{
 		obs_canvas_t *canvas = vx_vert_canvas();
@@ -518,7 +866,12 @@ private:
 		for (obs_sceneitem_t *item : scene_items(current_scene())) {
 			obs_source_t *src = obs_sceneitem_get_source(item);
 			const char *n = src ? obs_source_get_name(src) : "?";
-			auto *it = new QListWidgetItem(QString::fromUtf8(n ? n : "?"));
+			QString label = QString::fromUtf8(n ? n : "?");
+			if (!obs_sceneitem_visible(item))
+				label.prepend(QStringLiteral("👁 ")); // masquée
+			if (obs_sceneitem_locked(item))
+				label.prepend(QStringLiteral("🔒 "));
+			auto *it = new QListWidgetItem(label);
 			// L'id du sceneitem permet de sélectionner/surligner dans l'aperçu.
 			it->setData(Qt::UserRole, (qlonglong)obs_sceneitem_get_id(item));
 			list->addItem(it);

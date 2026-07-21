@@ -347,20 +347,15 @@ jobs:
         working-directory: installer
         run: |
           : Prepare Payload 📦
-          # Les deux payloads suivent le layout « plugin folder » d'OBS 28+
+          # Le payload suit le layout « plugin folder » d'OBS 28+
           # (<nom>/bin/64bit + <nom>/data), installé par le .nsi dans
           # C:\ProgramData\obs-studio\plugins. C'est le layout produit par
-          # obs-plugintemplate (cmake/windows/helpers.cmake) et par la variante
-          # « programdata » des releases Aitum — PAS d'aplatissement.
-          mkdir -p payload/vx payload/vertical nsis-plugins/x86-unicode
+          # obs-plugintemplate (cmake/windows/helpers.cmake) — PAS d'aplatissement.
+          # Le canvas vertical est désormais NATIF (dock VX Vertical) : plus
+          # aucun plugin tiers à télécharger.
+          mkdir -p payload/vx nsis-plugins/x86-unicode
           unzip -q ../plugin-artifact/*windows-x64*.zip -d payload/vx
           test -d payload/vx/vx-stream/bin || { echo '::error::payload vx inattendu'; find payload/vx -maxdepth 3 | head -10 | while read l; do echo "::error::$l"; done; exit 1; }
-
-          # Aitum Vertical Canvas (GPL) — version épinglée, variante programdata.
-          curl -sL -o vertical.zip \
-            'https://github.com/aitum/obs-vertical-canvas/releases/download/1.6.4/vertical-canvas-windows-programdata.zip'
-          unzip -q vertical.zip -d payload/vertical
-          test -d payload/vertical/vertical-canvas/bin || { echo '::error::payload vertical inattendu'; find payload/vertical -maxdepth 3 | head -10 | while read l; do echo "::error::$l"; done; exit 1; }
 
           # Plugin NSIS de téléchargement (INetC).
           curl -sL -o inetc.zip 'https://nsis.sourceforge.io/mediawiki/images/c/c9/Inetc.zip'

@@ -4,10 +4,10 @@
 ; Installe, dans l'ordre :
 ;   1. OBS Studio officiel (téléchargé depuis GitHub SEULEMENT s'il est absent —
 ;      la plupart des streamers l'ont déjà : dans ce cas, aucune attente) ;
-;   2. le plugin VX.Stream (docks natifs, menu, thème, multistream) ;
-;   3. Aitum Vertical Canvas (canvas vertical 9:16 pour TikTok/YT mobile, GPL).
+;   2. le plugin VX.Stream (docks natifs, menu, thème, multistream, canvas
+;      vertical VX Vertical — 100 % maison, plus aucune dépendance tierce).
 ;
-; Le payload (plugin + vertical) est préparé par la CI dans installer/payload/
+; Le payload (plugin) est préparé par la CI dans installer/payload/
 ; AVANT makensis — voir le job « installer » du workflow. Compilé sous Linux
 ; (makensis 3.x) ; le plugin INetC (téléchargement avec progression) est déposé
 ; par la CI dans installer/nsis-plugins/x86-unicode/.
@@ -150,13 +150,11 @@ Fermez OBS Studio complètement puis relancez cet installateur."
     Abort
   ${EndIf}
   DetailPrint "Plugin VX.Stream installé."
-SectionEnd
 
-Section "Canvas vertical (TikTok / mobile)" SecVertical
-  SetShellVarContext all
-  SetOutPath "$APPDATA\obs-studio\plugins"
-  File /r "payload\vertical\"
-  DetailPrint "Aitum Vertical Canvas installé."
+  ; Purge de l'ancien canvas vertical Aitum : les versions ≤ 0.14.0 le
+  ; bundlaient. On le retire pour ne laisser QUE notre dock « VX Vertical »
+  ; (sinon deux docks verticaux coexistent et prêtent à confusion).
+  RMDir /r "$APPDATA\obs-studio\plugins\vertical-canvas"
 SectionEnd
 
 Section "-post"
@@ -174,8 +172,7 @@ SectionEnd
 ; ── Descriptions des composants ───────────────────────────────────────────────
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecObs} "OBS Studio officiel — téléchargé et installé uniquement s'il est absent de cette machine."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecVx} "Docks Valerix, menu VX.Stream, thème et multistream, directement dans OBS."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecVertical} "Second canvas 9:16 avec ses propres sorties, pour diffuser en vertical (Aitum Vertical, GPL)."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecVx} "Docks Valerix, menu VX.Stream, thème, multistream et canvas vertical, directement dans OBS."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 ; ── Désinstallation (retire NOS fichiers, jamais OBS) ─────────────────────────

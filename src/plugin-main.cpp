@@ -65,28 +65,32 @@ static void add_vx_menu(void)
 
 	QMenu *menu = window->menuBar()->addMenu(QStringLiteral("VX.Stream"));
 
-	// ── Docks : cases à cocher natives (toggleViewAction, toujours synchro) ──
+	// ── Panneaux : TOUS les docks Valerix regroupés ICI, pour ne pas avoir à
+	// les chercher dans le menu « Docks » d'OBS. Ce sont des cases à cocher
+	// natives (toggleViewAction) : afficher/masquer toujours synchronisé.
+	QMenu *panels = menu->addMenu(QStringLiteral("Panneaux"));
+
 	if (vx_docks_available()) {
 		size_t n = 0;
 		const char *const *ids = vx_dock_ids(&n);
 		for (size_t i = 0; i < n; i++) {
 			QAction *a = vx_dock_toggle_action(ids[i]);
 			if (a)
-				menu->addAction(a);
+				panels->addAction(a);
 		}
 	} else {
-		QAction *warn = menu->addAction(QStringLiteral("⚠ Docks indisponibles (obs-browser manquant)"));
+		QAction *warn = panels->addAction(QStringLiteral("⚠ Docks web indisponibles (obs-browser manquant)"));
 		warn->setEnabled(false);
 	}
 
-	// Docks Qt natifs : même mécanique de toggle (vx_dock_toggle_action
-	// retrouve n'importe quel QDockWidget par son id).
-	QAction *msDock = vx_dock_toggle_action("vx_multistream");
-	if (msDock)
-		menu->addAction(msDock);
-	QAction *vertDock = vx_dock_toggle_action("vx_vertical");
-	if (vertDock)
-		menu->addAction(vertDock);
+	// Docks Qt natifs (vx_dock_toggle_action retrouve n'importe quel QDockWidget
+	// par son id) : Multistream + les trois docks verticaux.
+	panels->addSeparator();
+	for (const char *id : {"vx_multistream", "vx_vertical", "vx_vertical_scenes", "vx_vertical_sources"}) {
+		QAction *a = vx_dock_toggle_action(id);
+		if (a)
+			panels->addAction(a);
+	}
 
 	menu->addSeparator();
 

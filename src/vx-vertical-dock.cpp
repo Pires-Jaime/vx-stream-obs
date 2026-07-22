@@ -4,9 +4,12 @@ Copyright (C) 2026 Valerix (Jaime Pires) <support@valerix.stream>
 SPDX-License-Identifier: GPL-2.0-or-later
 */
 
-// Le dock du canvas vertical : un ÉDITEUR 9:16 complet — aperçu en direct,
-// scènes verticales, et manipulation des sources à la souris (sélection,
-// déplacement, 8 poignées de redimensionnement, magnétisme, clic droit).
+// L'éditeur du canvas vertical, éclaté en TROIS docks à la manière d'Aitum :
+//   • « VX Vertical »  : l'aperçu 9:16 interactif (petit) — clic, déplacement,
+//                        8 poignées, magnétisme ;
+//   • « VX Scènes »    : la liste des scènes verticales (créer/choisir) ;
+//   • « VX Sources »   : les sources de la scène courante (ajouter/clic droit).
+// Ils partagent le même canvas ; un notifieur les tient synchronisés.
 // La DIFFUSION, elle, se règle dans VX Multistream (destinations « vertical »).
 //
 // L'aperçu est un obs_display embarqué dans un QWidget à fenêtre NATIVE
@@ -20,7 +23,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
 
-#include <QComboBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -31,6 +33,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -41,6 +44,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -642,260 +646,148 @@ const char *camera_source_id()
 #endif
 }
 
-// ── Le dock ──────────────────────────────────────────────────────────────────
+// ── Docks : aperçu / scènes / sources (modèle « à la Aitum ») ────────────────
+// Trois docks séparés qui partagent le MÊME canvas vertical. Un notifieur simple
+// (thread UI uniquement) fait qu'une action dans un dock rafraîchit les autres :
+// choisir une scène recharge la liste des sources ; ajouter une source la fait
+// apparaître dans l'aperçu (qui, lui, se rend en direct — rien à rafraîchir).
 
-class VertDockWidget : public QWidget {
+VertPreview *g_preview = nullptr;                // référence partagée (sélection)
+std::vector<std::function<void()>> g_refreshers; // rebuilders des listes
+
+void vx_register_refresher(std::function<void()> f)
+{
+	g_refreshers.push_back(std::move(f));
+}
+void vx_refresh_all()
+{
+	for (auto &f : g_refreshers)
+		if (f)
+			f();
+}
+void vx_select_in_preview(long long id)
+{
+	if (g_preview)
+		g_preview->selectExternally(id);
+}
+
+// ── Dock 1 : aperçu (petit) ──────────────────────────────────────────────────
+
+class VertPreviewDock : public QWidget {
 public:
-	VertDockWidget()
+	VertPreviewDock()
 	{
 		auto *root = new QVBoxLayout(this);
-		root->setContentsMargins(8, 8, 8, 8);
-		root->setSpacing(6);
-
+		root->setContentsMargins(6, 6, 6, 6);
+		root->setSpacing(4);
 		preview = new VertPreview(this);
 		root->addWidget(preview, 1);
-
-		// Scènes verticales.
-		auto *sceneRow = new QHBoxLayout();
-		sceneCombo = new QComboBox(this);
-		connect(sceneCombo, &QComboBox::activated, this, [this](int) { onSceneSelected(); });
-		auto *addScene = new QPushButton(QStringLiteral("＋"), this);
-		addScene->setFixedWidth(28);
-		addScene->setToolTip(QStringLiteral("Nouvelle scène verticale"));
-		connect(addScene, &QPushButton::clicked, this, [this] { onAddScene(); });
-		auto *delScene = new QPushButton(QStringLiteral("−"), this);
-		delScene->setFixedWidth(28);
-		delScene->setToolTip(QStringLiteral("Supprimer la scène verticale"));
-		connect(delScene, &QPushButton::clicked, this, [this] { onRemoveScene(); });
-		sceneRow->addWidget(new QLabel(QStringLiteral("Scène"), this));
-		sceneRow->addWidget(sceneCombo, 1);
-		sceneRow->addWidget(addScene);
-		sceneRow->addWidget(delScene);
-		root->addLayout(sceneRow);
-
-		// Sources de la scène.
-		list = new QListWidget(this);
-		list->setMaximumHeight(80);
-		// Clic droit : renommer, ordre, visibilité, propriétés, supprimer.
-		list->setContextMenuPolicy(Qt::CustomContextMenu);
-		connect(list, &QListWidget::customContextMenuRequested, this,
-			[this](const QPoint &p) { showSourceMenu(list->mapToGlobal(p)); });
-		// Sélectionner dans la liste surligne la source dans l'aperçu.
-		connect(list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *it) {
-			if (preview && it)
-				preview->selectExternally(it->data(Qt::UserRole).toLongLong());
-		});
-		root->addWidget(list);
-
-		auto *srcRow = new QHBoxLayout();
-		auto *addSrc = new QPushButton(QStringLiteral("＋ Source"), this);
-		auto *menu = new QMenu(addSrc);
-		menu->addAction(QStringLiteral("Scène principale (recadrée)"), [this] { onAddMainScene(); });
-		menu->addAction(QStringLiteral("Caméra"), [this] { onAddCamera(); });
-		menu->addAction(QStringLiteral("Source navigateur (URL)…"), [this] { onAddBrowser(); });
-		addSrc->setMenu(menu);
-		auto *delSrc = new QPushButton(QStringLiteral("−"), this);
-		delSrc->setFixedWidth(28);
-		delSrc->setToolTip(QStringLiteral("Retirer la source sélectionnée"));
-		connect(delSrc, &QPushButton::clicked, this, [this] { onRemoveSource(); });
-		auto *fill = new QPushButton(QStringLiteral("Remplir"), this);
-		fill->setToolTip(QStringLiteral("Remplit le 9:16 (recadre les bords)"));
-		connect(fill, &QPushButton::clicked, this, [this] { onPreset(true); });
-		auto *fit = new QPushButton(QStringLiteral("Adapter"), this);
-		fit->setToolTip(QStringLiteral("Tout visible (bandes possibles)"));
-		connect(fit, &QPushButton::clicked, this, [this] { onPreset(false); });
-		srcRow->addWidget(addSrc);
-		srcRow->addWidget(delSrc);
-		srcRow->addStretch(1);
-		srcRow->addWidget(fill);
-		srcRow->addWidget(fit);
-		root->addLayout(srcRow);
-
-		// La diffusion du canvas vertical se règle dans VX Multistream : une note
-		// discrète le rappelle, ce dock ne sert qu'à composer et prévisualiser.
-		auto *hint = new QLabel(
-			QStringLiteral("La diffusion se règle dans <b>VX Multistream</b> : ajoutez une destination "
-				       "en choisissant le canvas <b>Vertical</b> (TikTok, YouTube vertical…)."),
-			this);
+		auto *hint = new QLabel(QStringLiteral("Scènes & Sources : docks <b>VX Scènes</b> / <b>VX Sources</b>. "
+						       "Diffusion : <b>VX Multistream</b> (destination Vertical)."),
+					this);
 		hint->setWordWrap(true);
-		hint->setStyleSheet(QStringLiteral("color: #888; font-size: 10px;"));
+		hint->setStyleSheet(QStringLiteral("color: #888; font-size: 9px;"));
 		root->addWidget(hint);
-
-		refreshScenes();
+		g_preview = preview;
 	}
-
 	void destroyPreview()
 	{
 		if (preview)
 			preview->destroyDisplay();
+		if (g_preview == preview)
+			g_preview = nullptr;
 	}
 
 private:
 	VertPreview *preview = nullptr;
-	QComboBox *sceneCombo = nullptr;
+};
+
+// ── Dock 2 : scènes verticales ───────────────────────────────────────────────
+
+class VertScenesDock : public QWidget {
+public:
+	VertScenesDock()
+	{
+		auto *root = new QVBoxLayout(this);
+		root->setContentsMargins(6, 6, 6, 6);
+		root->setSpacing(4);
+
+		list = new QListWidget(this);
+		connect(list, &QListWidget::currentRowChanged, this, [this](int) {
+			if (!refreshing)
+				onSelect();
+		});
+		root->addWidget(list, 1);
+
+		auto *row = new QHBoxLayout();
+		auto *add = new QPushButton(QStringLiteral("＋ Scène"), this);
+		connect(add, &QPushButton::clicked, this, [this] { onAdd(); });
+		auto *del = new QPushButton(QStringLiteral("−"), this);
+		del->setFixedWidth(28);
+		del->setToolTip(QStringLiteral("Supprimer la scène"));
+		connect(del, &QPushButton::clicked, this, [this] { onRemove(); });
+		row->addWidget(add);
+		row->addWidget(del);
+		row->addStretch(1);
+		root->addLayout(row);
+
+		vx_register_refresher([this] { refresh(); });
+		refresh();
+	}
+
+private:
 	QListWidget *list = nullptr;
+	bool refreshing = false;
 
-	// Item de scène correspondant à la ligne sélectionnée dans la liste.
-	obs_sceneitem_t *selectedItem()
+	void refresh()
 	{
-		QListWidgetItem *it = list->currentItem();
-		if (!it)
-			return nullptr;
-		obs_scene_t *scene = current_scene();
-		if (!scene)
-			return nullptr;
-		return obs_scene_find_sceneitem_by_id(scene, it->data(Qt::UserRole).toLongLong());
-	}
-
-	void showSourceMenu(const QPoint &globalPos)
-	{
-		obs_sceneitem_t *item = selectedItem();
-		if (!item)
-			return;
-		obs_source_t *src = obs_sceneitem_get_source(item);
-		QMenu m(this);
-
-		m.addAction(QStringLiteral("Renommer…"), [this, src] {
-			if (!src)
-				return;
-			bool ok = false;
-			const QString cur = QString::fromUtf8(obs_source_get_name(src));
-			const QString n = QInputDialog::getText(this, QStringLiteral("Renommer la source"),
-								QStringLiteral("Nom :"), QLineEdit::Normal, cur, &ok);
-			if (ok && !n.trimmed().isEmpty()) {
-				obs_source_set_name(src, n.trimmed().toUtf8().constData());
-				refreshItems();
-				vx_vert_save();
-			}
-		});
-
-		const bool visible = obs_sceneitem_visible(item);
-		m.addAction(visible ? QStringLiteral("Masquer") : QStringLiteral("Afficher"), [this, item, visible] {
-			obs_sceneitem_set_visible(item, !visible);
-			refreshItems();
-			vx_vert_save();
-		});
-		const bool locked = obs_sceneitem_locked(item);
-		m.addAction(locked ? QStringLiteral("Déverrouiller") : QStringLiteral("Verrouiller"),
-			    [this, item, locked] {
-				    obs_sceneitem_set_locked(item, !locked);
-				    refreshItems();
-				    vx_vert_save();
-			    });
-
-		m.addSeparator();
-		m.addAction(QStringLiteral("Monter d'un plan"), [this, item] {
-			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_UP);
-			refreshItems();
-			vx_vert_save();
-		});
-		m.addAction(QStringLiteral("Descendre d'un plan"), [this, item] {
-			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_DOWN);
-			refreshItems();
-			vx_vert_save();
-		});
-		m.addAction(QStringLiteral("Mettre au premier plan"), [this, item] {
-			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
-			refreshItems();
-			vx_vert_save();
-		});
-		m.addAction(QStringLiteral("Mettre à l'arrière-plan"), [this, item] {
-			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_BOTTOM);
-			refreshItems();
-			vx_vert_save();
-		});
-
-		m.addSeparator();
-		m.addAction(QStringLiteral("Remplir le cadre 9:16"), [this, item] {
-			apply_bounds(item, true);
-			vx_vert_save();
-		});
-		m.addAction(QStringLiteral("Adapter au cadre 9:16"), [this, item] {
-			apply_bounds(item, false);
-			vx_vert_save();
-		});
-		m.addAction(QStringLiteral("Centrer"), [this, item] {
-			Box b;
-			if (!sceneitem_box(item, &b))
-				return;
-			const float w = b.x1 - b.x0, h = b.y1 - b.y0;
-			const float cxm = 1080.0f / 2, cym = 1920.0f / 2;
-			apply_aabb(item, Box{cxm - w / 2, cym - h / 2, cxm + w / 2, cym + h / 2});
-			vx_vert_save();
-		});
-
-		// Propriétés / filtres : on réutilise les fenêtres natives d'OBS.
-		if (src) {
-			m.addSeparator();
-			m.addAction(QStringLiteral("Propriétés…"), [src] { obs_frontend_open_source_properties(src); });
-			m.addAction(QStringLiteral("Filtres…"), [src] { obs_frontend_open_source_filters(src); });
-		}
-
-		m.addSeparator();
-		m.addAction(QStringLiteral("Supprimer"), [this] { onRemoveSource(); });
-
-		m.exec(globalPos);
-	}
-
-	void refreshScenes()
-	{
-		obs_canvas_t *canvas = vx_vert_canvas();
-		sceneCombo->clear();
-		if (!canvas)
-			return;
-		obs_scene_t *cur = current_scene();
-		const char *curName = cur ? obs_source_get_name(obs_scene_get_source(cur)) : nullptr;
-		struct Ctx {
-			QComboBox *combo;
-			const char *cur;
-		} ctx{sceneCombo, curName};
-		obs_canvas_enum_scenes(
-			canvas,
-			[](void *p, obs_source_t *src) {
-				auto *c = static_cast<Ctx *>(p);
-				const char *n = obs_source_get_name(src);
-				c->combo->addItem(QString::fromUtf8(n ? n : "?"));
-				if (c->cur && n && strcmp(c->cur, n) == 0)
-					c->combo->setCurrentIndex(c->combo->count() - 1);
-				return true;
-			},
-			&ctx);
-		refreshItems();
-	}
-
-	void refreshItems()
-	{
+		refreshing = true;
+		QSignalBlocker block(list); // ne pas déclencher onSelect en rebâtissant
 		list->clear();
-		for (obs_sceneitem_t *item : scene_items(current_scene())) {
-			obs_source_t *src = obs_sceneitem_get_source(item);
-			const char *n = src ? obs_source_get_name(src) : "?";
-			QString label = QString::fromUtf8(n ? n : "?");
-			if (!obs_sceneitem_visible(item))
-				label.prepend(QStringLiteral("👁 ")); // masquée
-			if (obs_sceneitem_locked(item))
-				label.prepend(QStringLiteral("🔒 "));
-			auto *it = new QListWidgetItem(label);
-			// L'id du sceneitem permet de sélectionner/surligner dans l'aperçu.
-			it->setData(Qt::UserRole, (qlonglong)obs_sceneitem_get_id(item));
-			list->addItem(it);
+		obs_canvas_t *canvas = vx_vert_canvas();
+		if (canvas) {
+			obs_scene_t *cur = current_scene();
+			const char *curName = cur ? obs_source_get_name(obs_scene_get_source(cur)) : nullptr;
+			struct Ctx {
+				QListWidget *list;
+				const char *cur;
+				int curRow;
+				int row;
+			} ctx{list, curName, -1, 0};
+			obs_canvas_enum_scenes(
+				canvas,
+				[](void *p, obs_source_t *src) {
+					auto *c = static_cast<Ctx *>(p);
+					const char *n = obs_source_get_name(src);
+					c->list->addItem(QString::fromUtf8(n ? n : "?"));
+					if (c->cur && n && strcmp(c->cur, n) == 0)
+						c->curRow = c->row;
+					c->row++;
+					return true;
+				},
+				&ctx);
+			if (ctx.curRow >= 0)
+				list->setCurrentRow(ctx.curRow);
 		}
+		refreshing = false;
 	}
 
-	void onSceneSelected()
+	void onSelect()
 	{
 		obs_canvas_t *canvas = vx_vert_canvas();
-		if (!canvas)
+		QListWidgetItem *it = list->currentItem();
+		if (!canvas || !it)
 			return;
-		const QByteArray name = sceneCombo->currentText().toUtf8();
+		const QByteArray name = it->text().toUtf8();
 		obs_source_t *src = obs_canvas_get_source_by_name(canvas, name.constData());
 		if (src) {
 			obs_canvas_set_channel(canvas, 0, src);
 			obs_source_release(src);
 		}
-		refreshItems();
+		vx_refresh_all(); // la liste des sources suit la scène courante
 	}
 
-	void onAddScene()
+	void onAdd()
 	{
 		obs_canvas_t *canvas = vx_vert_canvas();
 		if (!canvas)
@@ -903,26 +795,24 @@ private:
 		bool ok = false;
 		const QString name = QInputDialog::getText(this, QStringLiteral("Nouvelle scène verticale"),
 							   QStringLiteral("Nom :"), QLineEdit::Normal,
-							   QStringLiteral("Verticale %1").arg(sceneCombo->count() + 1),
-							   &ok);
+							   QStringLiteral("Verticale %1").arg(list->count() + 1), &ok);
 		if (!ok || name.trimmed().isEmpty())
 			return;
 		obs_scene_t *scene = obs_canvas_scene_create(canvas, name.trimmed().toUtf8().constData());
 		if (scene)
 			obs_canvas_set_channel(canvas, 0, obs_scene_get_source(scene));
 		vx_vert_save();
-		refreshScenes();
+		vx_refresh_all();
 	}
 
-	void onRemoveScene()
+	void onRemove()
 	{
 		obs_canvas_t *canvas = vx_vert_canvas();
 		obs_scene_t *scene = current_scene();
-		if (!canvas || !scene || sceneCombo->count() <= 1)
+		if (!canvas || !scene || list->count() <= 1)
 			return; // toujours garder au moins une scène
 		obs_canvas_set_channel(canvas, 0, nullptr);
 		obs_canvas_scene_remove(scene);
-		// Rebrancher le canal sur la première scène restante.
 		struct Ctx {
 			obs_source_t *first = nullptr;
 		} ctx;
@@ -940,7 +830,93 @@ private:
 			obs_source_release(ctx.first);
 		}
 		vx_vert_save();
-		refreshScenes();
+		vx_refresh_all();
+	}
+};
+
+// ── Dock 3 : sources de la scène courante ────────────────────────────────────
+
+class VertSourcesDock : public QWidget {
+public:
+	VertSourcesDock()
+	{
+		auto *root = new QVBoxLayout(this);
+		root->setContentsMargins(6, 6, 6, 6);
+		root->setSpacing(4);
+
+		list = new QListWidget(this);
+		list->setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(list, &QListWidget::customContextMenuRequested, this,
+			[this](const QPoint &p) { showMenu(list->mapToGlobal(p)); });
+		// Sélectionner une source la surligne dans l'aperçu (pas de notify).
+		connect(list, &QListWidget::currentItemChanged, this, [](QListWidgetItem *it) {
+			if (it)
+				vx_select_in_preview(it->data(Qt::UserRole).toLongLong());
+		});
+		root->addWidget(list, 1);
+
+		auto *row = new QHBoxLayout();
+		auto *add = new QPushButton(QStringLiteral("＋ Source"), this);
+		auto *menu = new QMenu(add);
+		menu->addAction(QStringLiteral("Scène principale (recadrée)"), [this] { onAddMainScene(); });
+		menu->addAction(QStringLiteral("Caméra"), [this] { onAddCamera(); });
+		menu->addAction(QStringLiteral("Source navigateur (URL)…"), [this] { onAddBrowser(); });
+		add->setMenu(menu);
+		auto *del = new QPushButton(QStringLiteral("−"), this);
+		del->setFixedWidth(28);
+		del->setToolTip(QStringLiteral("Retirer la source"));
+		connect(del, &QPushButton::clicked, this, [this] { onRemove(); });
+		auto *fill = new QPushButton(QStringLiteral("Remplir"), this);
+		connect(fill, &QPushButton::clicked, this, [this] { onPreset(true); });
+		auto *fit = new QPushButton(QStringLiteral("Adapter"), this);
+		connect(fit, &QPushButton::clicked, this, [this] { onPreset(false); });
+		row->addWidget(add);
+		row->addWidget(del);
+		row->addStretch(1);
+		row->addWidget(fill);
+		row->addWidget(fit);
+		root->addLayout(row);
+
+		vx_register_refresher([this] { refresh(); });
+		refresh();
+	}
+
+private:
+	QListWidget *list = nullptr;
+
+	obs_sceneitem_t *selectedItem()
+	{
+		QListWidgetItem *it = list->currentItem();
+		obs_scene_t *scene = current_scene();
+		if (!it || !scene)
+			return nullptr;
+		return obs_scene_find_sceneitem_by_id(scene, it->data(Qt::UserRole).toLongLong());
+	}
+
+	void refresh()
+	{
+		QSignalBlocker block(list);
+		const long long keep = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toLongLong() : 0;
+		list->clear();
+		int selRow = -1, row = 0;
+		for (obs_sceneitem_t *item : scene_items(current_scene())) {
+			obs_source_t *src = obs_sceneitem_get_source(item);
+			const char *n = src ? obs_source_get_name(src) : "?";
+			QString label = QString::fromUtf8(n ? n : "?");
+			if (!obs_sceneitem_visible(item))
+				label.prepend(QStringLiteral("👁 "));
+			if (obs_sceneitem_locked(item))
+				label.prepend(QStringLiteral("🔒 "));
+			auto *it = new QListWidgetItem(label);
+			const long long id = (long long)obs_sceneitem_get_id(item);
+			it->setData(Qt::UserRole, (qlonglong)id);
+			list->addItem(it);
+			if (id == keep)
+				selRow = row;
+			row++;
+		}
+		if (selRow >= 0)
+			list->setCurrentRow(selRow);
 	}
 
 	void addSourceToScene(obs_source_t *src, bool fill)
@@ -952,7 +928,7 @@ private:
 		if (item)
 			apply_bounds(item, fill);
 		vx_vert_save();
-		refreshItems();
+		vx_refresh_all();
 	}
 
 	void onAddMainScene()
@@ -960,7 +936,7 @@ private:
 		obs_source_t *main = obs_frontend_get_current_scene();
 		if (!main)
 			return;
-		addSourceToScene(main, true); // Remplir : le stream recadré en 9:16
+		addSourceToScene(main, true);
 		obs_source_release(main);
 	}
 
@@ -991,59 +967,154 @@ private:
 		obs_data_release(ss);
 		if (!src)
 			return;
-		addSourceToScene(src, false); // déjà au bon format → Adapter
+		addSourceToScene(src, false);
 		obs_source_release(src);
 	}
 
-	void onRemoveSource()
+	void onRemove()
 	{
-		const int row = list->currentRow();
-		if (row < 0)
+		obs_sceneitem_t *item = selectedItem();
+		if (!item)
 			return;
-		auto items = scene_items(current_scene());
-		if (row < (int)items.size())
-			obs_sceneitem_remove(items[row]);
+		obs_sceneitem_remove(item);
 		vx_vert_save();
-		refreshItems();
+		vx_refresh_all();
 	}
 
 	void onPreset(bool fill)
 	{
-		const int row = list->currentRow();
-		if (row < 0)
+		obs_sceneitem_t *item = selectedItem();
+		if (!item)
 			return;
-		auto items = scene_items(current_scene());
-		if (row < (int)items.size())
-			apply_bounds(items[row], fill);
+		apply_bounds(item, fill);
 		vx_vert_save();
+	}
+
+	void showMenu(const QPoint &globalPos)
+	{
+		obs_sceneitem_t *item = selectedItem();
+		if (!item)
+			return;
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		QMenu m(this);
+
+		m.addAction(QStringLiteral("Renommer…"), [this, src] {
+			if (!src)
+				return;
+			bool ok = false;
+			const QString cur = QString::fromUtf8(obs_source_get_name(src));
+			const QString n = QInputDialog::getText(this, QStringLiteral("Renommer la source"),
+								QStringLiteral("Nom :"), QLineEdit::Normal, cur, &ok);
+			if (ok && !n.trimmed().isEmpty()) {
+				obs_source_set_name(src, n.trimmed().toUtf8().constData());
+				vx_vert_save();
+				vx_refresh_all();
+			}
+		});
+
+		const bool visible = obs_sceneitem_visible(item);
+		m.addAction(visible ? QStringLiteral("Masquer") : QStringLiteral("Afficher"), [item, visible] {
+			obs_sceneitem_set_visible(item, !visible);
+			vx_vert_save();
+			vx_refresh_all();
+		});
+		const bool locked = obs_sceneitem_locked(item);
+		m.addAction(locked ? QStringLiteral("Déverrouiller") : QStringLiteral("Verrouiller"), [item, locked] {
+			obs_sceneitem_set_locked(item, !locked);
+			vx_vert_save();
+			vx_refresh_all();
+		});
+
+		m.addSeparator();
+		m.addAction(QStringLiteral("Monter d'un plan"), [item] {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_UP);
+			vx_vert_save();
+			vx_refresh_all();
+		});
+		m.addAction(QStringLiteral("Descendre d'un plan"), [item] {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_DOWN);
+			vx_vert_save();
+			vx_refresh_all();
+		});
+		m.addAction(QStringLiteral("Mettre au premier plan"), [item] {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
+			vx_vert_save();
+			vx_refresh_all();
+		});
+		m.addAction(QStringLiteral("Mettre à l'arrière-plan"), [item] {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_BOTTOM);
+			vx_vert_save();
+			vx_refresh_all();
+		});
+
+		m.addSeparator();
+		m.addAction(QStringLiteral("Remplir le cadre 9:16"), [item] {
+			apply_bounds(item, true);
+			vx_vert_save();
+		});
+		m.addAction(QStringLiteral("Adapter au cadre 9:16"), [item] {
+			apply_bounds(item, false);
+			vx_vert_save();
+		});
+		m.addAction(QStringLiteral("Centrer"), [item] {
+			Box b;
+			if (!sceneitem_box(item, &b))
+				return;
+			const float w = b.x1 - b.x0, h = b.y1 - b.y0;
+			apply_aabb(item, Box{540.0f - w / 2, 960.0f - h / 2, 540.0f + w / 2, 960.0f + h / 2});
+			vx_vert_save();
+		});
+
+		if (src) {
+			m.addSeparator();
+			m.addAction(QStringLiteral("Propriétés…"), [src] { obs_frontend_open_source_properties(src); });
+			m.addAction(QStringLiteral("Filtres…"), [src] { obs_frontend_open_source_filters(src); });
+		}
+
+		m.addSeparator();
+		m.addAction(QStringLiteral("Supprimer"), [this] { onRemove(); });
+
+		m.exec(globalPos);
 	}
 };
 
-VertDockWidget *dockWidget = nullptr;
+VertPreviewDock *previewDock = nullptr;
+VertScenesDock *scenesDock = nullptr;
+VertSourcesDock *sourcesDock = nullptr;
 
 } // namespace
 
 void vx_vert_dock_create(void)
 {
-	if (dockWidget)
+	if (previewDock)
 		return;
-	dockWidget = new VertDockWidget();
-	if (!obs_frontend_add_dock_by_id(DOCK_ID, "VX Vertical", dockWidget)) {
-		delete dockWidget;
-		dockWidget = nullptr;
+	previewDock = new VertPreviewDock();
+	if (!obs_frontend_add_dock_by_id(DOCK_ID, "VX Vertical", previewDock)) {
+		delete previewDock;
+		previewDock = nullptr;
 		obs_log(LOG_WARNING, "dock Vertical : création refusée");
 		return;
 	}
-	obs_log(LOG_INFO, "dock Vertical créé");
+	scenesDock = new VertScenesDock();
+	obs_frontend_add_dock_by_id("vx_vertical_scenes", "VX Scènes", scenesDock);
+	sourcesDock = new VertSourcesDock();
+	obs_frontend_add_dock_by_id("vx_vertical_sources", "VX Sources", sourcesDock);
+	obs_log(LOG_INFO, "docks Vertical créés (aperçu + scènes + sources)");
 }
 
 void vx_vert_dock_destroy(void)
 {
-	if (!dockWidget)
+	if (!previewDock)
 		return;
-	// L'obs_display est détruit ICI, synchronement : le retrait du dock peut
-	// être différé par Qt, or le canvas est libéré juste après (EXIT).
-	dockWidget->destroyPreview();
+	// Plus aucun rafraîchisseur ne doit tourner : les widgets vont disparaître.
+	g_refreshers.clear();
+	// L'obs_display est détruit ICI, synchronement : le canvas est libéré juste
+	// après (EXIT), et le retrait d'un dock peut être différé par Qt.
+	previewDock->destroyPreview();
 	obs_frontend_remove_dock(DOCK_ID);
-	dockWidget = nullptr;
+	obs_frontend_remove_dock("vx_vertical_scenes");
+	obs_frontend_remove_dock("vx_vertical_sources");
+	previewDock = nullptr;
+	scenesDock = nullptr;
+	sourcesDock = nullptr;
 }

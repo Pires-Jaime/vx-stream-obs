@@ -858,6 +858,11 @@ public:
 		auto *row = new QHBoxLayout();
 		auto *add = new QPushButton(QStringLiteral("＋ Source"), this);
 		auto *menu = new QMenu(add);
+		// Reprendre une source qui existe DÉJÀ dans OBS (comme le dock Sources) :
+		// sous-menu rempli à la volée à l'ouverture, pour rester à jour.
+		auto *existing = menu->addMenu(QStringLiteral("Source existante"));
+		connect(existing, &QMenu::aboutToShow, this, [this, existing] { populateExisting(existing); });
+		menu->addSeparator();
 		menu->addAction(QStringLiteral("Scène principale (recadrée)"), [this] { onAddMainScene(); });
 		menu->addAction(QStringLiteral("Caméra"), [this] { onAddCamera(); });
 		menu->addAction(QStringLiteral("Source navigateur (URL)…"), [this] { onAddBrowser(); });
@@ -929,6 +934,52 @@ private:
 			apply_bounds(item, fill);
 		vx_vert_save();
 		vx_refresh_all();
+	}
+
+	// Remplit le sous-menu avec toutes les sources vidéo existantes d'OBS —
+	// exactement celles qu'on retrouve dans le dock « Sources » (caméras,
+	// captures, images, textes, overlays…). On capture le NOM (pas le pointeur)
+	// pour éviter tout accès à une source supprimée entre l'ouverture et le clic.
+	void populateExisting(QMenu *m)
+	{
+		m->clear();
+		struct Ctx {
+			VertSourcesDock *self;
+			QMenu *m;
+			int count;
+		} ctx{this, m, 0};
+		obs_enum_sources(
+			[](void *p, obs_source_t *src) {
+				auto *c = static_cast<Ctx *>(p);
+				// Sources vidéo uniquement (une source purement audio n'a rien
+				// à afficher dans un canvas 9:16).
+				if (!(obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO))
+					return true;
+				const char *n = obs_source_get_name(src);
+				if (!n || !*n)
+					return true;
+				const QString name = QString::fromUtf8(n);
+				c->m->addAction(name, c->self,
+						[self = c->self, name] { self->addExistingByName(name); });
+				c->count++;
+				return true;
+			},
+			&ctx);
+		if (ctx.count == 0) {
+			QAction *none = m->addAction(QStringLiteral("(aucune source pour l'instant)"));
+			none->setEnabled(false);
+		}
+	}
+
+	void addExistingByName(const QString &name)
+	{
+		obs_source_t *src = obs_get_source_by_name(name.toUtf8().constData());
+		if (!src)
+			return;
+		// « Adapter » par défaut : on n'ampute rien de la source d'origine
+		// (l'utilisateur peut ensuite « Remplir » au clic droit).
+		addSourceToScene(src, false);
+		obs_source_release(src);
 	}
 
 	void onAddMainScene()

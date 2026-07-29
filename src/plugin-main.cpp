@@ -34,16 +34,18 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QDesktopServices>
 #include <QUrl>
 
+#include "vx-account.hpp"
 #include "vx-backup.hpp"
 #include "vx-docks.hpp"
 #include "vx-ms-dock.hpp"
-#include "vx-multistream-dialog.hpp"
 #include "vx-multistream.hpp"
+#include "vx-report.hpp"
 #include "vx-scenes.hpp"
 #include "vx-theme.hpp"
 #include "vx-updater.hpp"
 #include "vx-vertical.hpp"
 #include "vx-vertical-dock.hpp"
+#include "vx-webdialog.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -65,10 +67,10 @@ static void add_vx_menu(void)
 
 	QMenu *menu = window->menuBar()->addMenu(QStringLiteral("VX.Stream"));
 
-	// ── Panneaux : TOUS les docks Valerix regroupés ICI, pour ne pas avoir à
-	// les chercher dans le menu « Docks » d'OBS. Ce sont des cases à cocher
-	// natives (toggleViewAction) : afficher/masquer toujours synchronisé.
-	QMenu *panels = menu->addMenu(QStringLiteral("Panneaux"));
+	// ── VX.Stream Docks : TOUS les docks Valerix regroupés ICI, pour ne pas
+	// avoir à les chercher dans le menu « Docks » d'OBS. Ce sont des cases à
+	// cocher natives (toggleViewAction) : afficher/masquer toujours synchronisé.
+	QMenu *panels = menu->addMenu(QStringLiteral("VX.Stream Docks"));
 
 	if (vx_docks_available()) {
 		size_t n = 0;
@@ -107,23 +109,55 @@ static void add_vx_menu(void)
 
 	menu->addSeparator();
 
-	QAction *ms = menu->addAction(QStringLiteral("Multistream…"));
-	QObject::connect(ms, &QAction::triggered, [] { vx_ms_show_dialog(); });
+	// ── Stream Setup : tout ce qui prépare le stream (overlays, scènes, docks,
+	// migration depuis un autre bot). NB : la gestion du Multistream vit dans le
+	// dock « VX Multistream » (bouton « Gérer les destinations ») — plus d'entrée
+	// de menu en doublon.
+	QMenu *setup = menu->addMenu(QStringLiteral("Stream Setup"));
 
-	QAction *scenes = menu->addAction(QStringLiteral("Ajouter mes overlays à la scène…"));
+	QAction *scenes = setup->addAction(QStringLiteral("➕ Ajouter mes overlays à la scène…"));
 	QObject::connect(scenes, &QAction::triggered, [] { vx_scenes_show_dialog(); });
+
+	QAction *ovPage = setup->addAction(QStringLiteral("🖼 Gérer mes overlays (site)…"));
+	QObject::connect(ovPage, &QAction::triggered, [] { open_url("https://valerix.stream/dashboard/overlays"); });
+
+	QAction *docksCfg = setup->addAction(QStringLiteral("⚙ Configurer mes docks…"));
+	QObject::connect(docksCfg, &QAction::triggered, [] { open_url("https://valerix.stream/obs"); });
+
+	QAction *importBots = setup->addAction(QStringLiteral("⇩ Importer depuis un autre bot…"));
+	QObject::connect(importBots, &QAction::triggered, [] { open_url("https://valerix.stream/dashboard/import"); });
+
+	// ── Émulateur d'événements : faux follow/sub/raid… pour tester les overlays
+	// sans attendre un vrai événement (parité SE.Live).
+	QAction *emu = menu->addAction(QStringLiteral("🧪 Émulateur d'événements…"));
+	QObject::connect(emu, &QAction::triggered, [] {
+		vx_webdialog_open("VX.Stream — Émulateur d'événements", "https://valerix.stream/obs/emulator", 560,
+				  620);
+	});
 
 	vx_backup_add_menu(menu);
 
 	menu->addSeparator();
 
-	QAction *docksCfg = menu->addAction(QStringLiteral("Configurer mes docks…"));
-	QObject::connect(docksCfg, &QAction::triggered, [] { open_url("https://valerix.stream/obs"); });
-
 	QAction *dash = menu->addAction(QStringLiteral("Ouvrir mon dashboard Valerix…"));
 	QObject::connect(dash, &QAction::triggered, [] { open_url("https://valerix.stream/dashboard"); });
 
+	// Connexion / déconnexion au compte Valerix (session partagée des docks).
+	vx_account_add_menu(menu);
+
 	menu->addSeparator();
+
+	// ── Aide : signalement (ticket support Valerix, diagnostic joint) + Discord.
+	QMenu *help = menu->addMenu(QStringLiteral("Aide"));
+
+	QAction *report = help->addAction(QStringLiteral("🐞 Signaler un problème…"));
+	QObject::connect(report, &QAction::triggered, [] { vx_report_show(); });
+
+	QAction *discord = help->addAction(QStringLiteral("💬 Support en direct (Discord)…"));
+	QObject::connect(discord, &QAction::triggered, [] { open_url("https://discord.gg/GzWeYEjPx"); });
+
+	QAction *checkUpd = menu->addAction(QStringLiteral("Vérifier les mises à jour…"));
+	QObject::connect(checkUpd, &QAction::triggered, [menu] { vx_updater_check_manual(menu); });
 
 	QAction *about = menu->addAction(QStringLiteral("VX.Stream v%1").arg(PLUGIN_VERSION));
 	about->setEnabled(false);
@@ -161,7 +195,8 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 	// modules — sinon crash garanti à chaque fermeture (cf. vx_destroy_docks).
 	case OBS_FRONTEND_EVENT_EXIT:
 		vx_ms_on_streaming_stopping();
-		vx_scenes_shutdown(); // contient un widget CEF — même règle que les docks
+		vx_scenes_shutdown();    // contient un widget CEF — même règle que les docks
+		vx_webdialog_shutdown(); // idem (émulateur / signalement)
 		vx_ms_dock_destroy();
 		vx_vert_dock_destroy(); // détruit l'obs_display AVANT de libérer le canvas
 		vx_vert_shutdown();
@@ -187,6 +222,7 @@ void obs_module_unload(void)
 	// tardif arrive (c'est le bug « OBS a planté » systématique à l'exit).
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
 	vx_updater_shutdown();
+	vx_report_shutdown();
 	vx_ms_shutdown();
 	obs_log(LOG_INFO, "VX.Stream déchargé");
 }

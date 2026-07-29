@@ -8,6 +8,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 // Qt6Network : rien ne garantit qu'OBS livre Qt6Network.dll, et une DLL
 // manquante empêcherait le plugin ENTIER de charger. Hors Windows le check
 // est simplement absent (la cible de l'installateur est Windows).
+//
+// Deux vérifications distinctes (parité SE.Live) :
+//   • le PLUGIN (endpoint /api/vx-stream/version, installe en 1 clic) ;
+//   • OBS lui-même (endpoint /api/vx-stream/obs-version → simple lien vers
+//     obsproject.com/download : ce n'est pas à nous d'installer OBS).
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -21,6 +26,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <QMetaObject>
 #include <QUrl>
 
+#include <atomic>
 #include <cctype>
 #include <string>
 #include <thread>
@@ -48,6 +54,36 @@ bool parse_semver(const std::string &s, int out[3])
 		}
 	}
 	return pos == s.size();
+}
+
+// Extrait le premier « X.Y[.Z] » d'une chaîne libre — obs_get_version_string()
+// peut contenir un suffixe (rc, beta) ou un préfixe selon les builds.
+std::string extract_semver(const std::string &s)
+{
+	size_t i = 0;
+	while (i < s.size()) {
+		if (isdigit((unsigned char)s[i])) {
+			size_t j = i;
+			int dots = 0;
+			while (j < s.size() && (isdigit((unsigned char)s[j]) || (s[j] == '.' && dots < 2))) {
+				if (s[j] == '.')
+					dots++;
+				j++;
+			}
+			std::string v = s.substr(i, j - i);
+			while (!v.empty() && v.back() == '.')
+				v.pop_back();
+			if (v.find('.') != std::string::npos) {
+				if (dots == 1)
+					v += ".0"; // "32.1" → "32.1.0"
+				return v;
+			}
+			i = j;
+		} else {
+			i++;
+		}
+	}
+	return {};
 }
 
 // Renvoie true si `remote` est strictement plus récent que `local`.
@@ -81,22 +117,23 @@ std::string parse_version(const std::string &body)
 }
 
 // Dernière version déjà signalée par MessageBox (pour ne le faire qu'une fois).
-std::string notified_file()
+// `name` distingue le fichier plugin du fichier OBS.
+std::string notified_file(const char *name)
 {
 	char *dir = obs_module_config_path("");
 	if (dir) {
 		os_mkdirs(dir);
 		bfree(dir);
 	}
-	char *p = obs_module_config_path("update-notified.txt");
+	char *p = obs_module_config_path(name);
 	std::string s = p ? p : "";
 	bfree(p);
 	return s;
 }
 
-std::string read_notified()
+std::string read_notified(const char *name)
 {
-	char *content = os_quick_read_utf8_file(notified_file().c_str());
+	char *content = os_quick_read_utf8_file(notified_file(name).c_str());
 	std::string s = content ? content : "";
 	bfree(content);
 	while (!s.empty() && (s.back() == '\n' || s.back() == '\r'))
@@ -104,10 +141,26 @@ std::string read_notified()
 	return s;
 }
 
-void write_notified(const std::string &v)
+void write_notified(const char *name, const std::string &v)
 {
-	os_quick_write_utf8_file(notified_file().c_str(), v.c_str(), v.size(), false);
+	os_quick_write_utf8_file(notified_file(name).c_str(), v.c_str(), v.size(), false);
 }
+
+const char *PLUGIN_NOTIFIED = "update-notified.txt";
+const char *OBS_NOTIFIED = "obs-update-notified.txt";
+const char *OBS_DOWNLOAD_URL = "https://obsproject.com/download";
+
+// Version d'OBS en cours, normalisée "X.Y.Z".
+std::string local_obs_version(void)
+{
+	return extract_semver(obs_get_version_string());
+}
+
+// Chemins interrogés par les DEUX plateformes (le code commun les passe à
+// http_get_body) — les garder hors du #ifdef évite aussi l'erreur
+// « const inutilisée » hors _WIN32 (warnings-as-errors).
+static const char *VERSION_URL_PATH = "/api/vx-stream/version";
+static const char *OBS_VERSION_URL_PATH = "/api/vx-stream/obs-version";
 
 } // namespace
 
@@ -124,10 +177,9 @@ void write_notified(const std::string &v)
 #include <cstdio>
 
 static const char *VERSION_URL_HOST = "valerix.stream";
-static const char *VERSION_URL_PATH = "/api/vx-stream/version";
 static const char *INSTALLER_PATH = "/downloads/VX.Stream-Installer.exe";
 
-static std::string http_get_version_body()
+static std::string http_get_body(const char *path)
 {
 	std::string body;
 	HINTERNET net = InternetOpenA("vx-stream-plugin", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
@@ -142,7 +194,7 @@ static std::string http_get_version_body()
 	HINTERNET conn = InternetConnectA(net, VERSION_URL_HOST, INTERNET_DEFAULT_HTTPS_PORT, nullptr, nullptr,
 					  INTERNET_SERVICE_HTTP, 0, 0);
 	if (conn) {
-		HINTERNET req = HttpOpenRequestA(conn, "GET", VERSION_URL_PATH, nullptr, nullptr, nullptr,
+		HINTERNET req = HttpOpenRequestA(conn, "GET", path, nullptr, nullptr, nullptr,
 						 INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE, 0);
 		if (req) {
 			if (HttpSendRequestA(req, nullptr, 0, nullptr, 0)) {
@@ -224,7 +276,7 @@ static void launch_update(QWidget *parent)
 		window->close(); // fermeture PROPRE (confirmation si un stream tourne)
 }
 #else
-static std::string http_get_version_body()
+static std::string http_get_body(const char *)
 {
 	return {}; // cible Windows — pas de check ailleurs
 }
@@ -236,6 +288,8 @@ static void launch_update(QWidget *)
 #endif
 
 static std::thread checkThread;
+static std::thread manualThread;
+static std::atomic<bool> manualBusy{false};
 
 void vx_updater_shutdown(void)
 {
@@ -244,58 +298,175 @@ void vx_updater_shutdown(void)
 	// WinINet de 5 s bornent l'attente au pire cas.
 	if (checkThread.joinable())
 		checkThread.join();
+	if (manualThread.joinable())
+		manualThread.join();
+}
+
+// Ajoute au menu l'entrée « ⬆ OBS vX disponible… » (simple lien de
+// téléchargement — installer OBS n'est pas notre rôle). Thread UI uniquement.
+static void add_obs_update_action(QMenu *menu, const std::string &remote)
+{
+	QAction *first = menu->actions().isEmpty() ? nullptr : menu->actions().first();
+	QAction *up =
+		new QAction(QStringLiteral("⬆ OBS Studio v%1 disponible…").arg(QString::fromStdString(remote)), menu);
+	QObject::connect(up, &QAction::triggered,
+			 [] { QDesktopServices::openUrl(QUrl(QString::fromUtf8(OBS_DOWNLOAD_URL))); });
+	menu->insertAction(first, up);
+	menu->insertSeparator(first);
 }
 
 void vx_updater_check(QMenu *menu)
 {
 	// Thread joignable : le lancement d'OBS ne doit JAMAIS attendre le réseau.
 	checkThread = std::thread([menu] {
-		const std::string body = http_get_version_body();
+		// ── Plugin ──
+		const std::string body = http_get_body(VERSION_URL_PATH);
 		const std::string remote = parse_version(body);
-		if (remote.empty() || !is_newer(remote, PLUGIN_VERSION)) {
-			if (!remote.empty())
-				obs_log(LOG_INFO, "updater : %s à jour (dernière : %s)", PLUGIN_VERSION,
-					remote.c_str());
-			return;
-		}
-		obs_log(LOG_INFO, "updater : mise à jour disponible %s → %s", PLUGIN_VERSION, remote.c_str());
+		const bool pluginOutdated = !remote.empty() && is_newer(remote, PLUGIN_VERSION);
+		if (!pluginOutdated && !remote.empty())
+			obs_log(LOG_INFO, "updater : %s à jour (dernière : %s)", PLUGIN_VERSION, remote.c_str());
 
-		const bool alreadyNotified = read_notified() == remote;
+		// ── OBS lui-même ──
+		const std::string obsBody = http_get_body(OBS_VERSION_URL_PATH);
+		const std::string obsRemote = parse_version(obsBody);
+		const std::string obsLocal = local_obs_version();
+		const bool obsOutdated = !obsRemote.empty() && !obsLocal.empty() && is_newer(obsRemote, obsLocal);
+
+		if (!pluginOutdated && !obsOutdated)
+			return;
+
+		if (pluginOutdated)
+			obs_log(LOG_INFO, "updater : mise à jour disponible %s → %s", PLUGIN_VERSION, remote.c_str());
+		if (obsOutdated)
+			obs_log(LOG_INFO, "updater : OBS %s → %s disponible", obsLocal.c_str(), obsRemote.c_str());
+
+		const bool pluginNotified = read_notified(PLUGIN_NOTIFIED) == remote;
+		const bool obsNotified = read_notified(OBS_NOTIFIED) == obsRemote;
 
 		// Retour sur le thread UI : Qt interdit de toucher aux widgets ailleurs.
 		QMetaObject::invokeMethod(
 			menu,
-			[menu, remote, alreadyNotified] {
-				QAction *first = menu->actions().isEmpty() ? nullptr : menu->actions().first();
-				QAction *up = new QAction(QStringLiteral("⬆ Mettre à jour vers v%1 (auto)…")
-								  .arg(QString::fromStdString(remote)),
-							  menu);
-				QObject::connect(up, &QAction::triggered, [menu] {
-					if (QMessageBox::question(menu->parentWidget(), QStringLiteral("VX.Stream"),
-								  QStringLiteral(
-									  "Installer la mise à jour maintenant ?\n\n"
-									  "OBS va se fermer, l'installateur s'ouvre, "
-									  "puis relancez OBS.")) == QMessageBox::Yes)
-						launch_update(menu->parentWidget());
-				});
-				menu->insertAction(first, up);
-				menu->insertSeparator(first);
+			[menu, remote, obsRemote, obsLocal, pluginOutdated, obsOutdated, pluginNotified, obsNotified] {
+				if (obsOutdated) {
+					add_obs_update_action(menu, obsRemote);
+					if (!obsNotified) {
+						write_notified(OBS_NOTIFIED, obsRemote);
+						if (QMessageBox::question(
+							    menu->parentWidget(), QStringLiteral("VX.Stream"),
+							    QStringLiteral(
+								    "Une mise à jour d'OBS Studio est disponible "
+								    "(v%1 → v%2).\n\nOuvrir la page de "
+								    "téléchargement ?")
+								    .arg(QString::fromStdString(obsLocal),
+									 QString::fromStdString(obsRemote)),
+							    QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
+							QDesktopServices::openUrl(
+								QUrl(QString::fromUtf8(OBS_DOWNLOAD_URL)));
+					}
+				}
 
-				if (!alreadyNotified) {
-					write_notified(remote);
-					// PLUGIN_VERSION est une variable extern (pas un littéral)
-					// → fromUtf8, pas QStringLiteral.
-					const auto choice = QMessageBox::question(
-						menu->parentWidget(), QStringLiteral("VX.Stream"),
-						QStringLiteral("Une mise à jour de VX.Stream est disponible "
-							       "(v%1 → v%2).\n\nL'installer maintenant ? OBS se "
-							       "fermera, puis relancez-le. (Aussi disponible à "
-							       "tout moment via le menu VX.Stream.)")
-							.arg(QString::fromUtf8(PLUGIN_VERSION),
-							     QString::fromStdString(remote)),
-						QMessageBox::Yes | QMessageBox::No);
-					if (choice == QMessageBox::Yes)
-						launch_update(menu->parentWidget());
+				if (pluginOutdated) {
+					QAction *first = menu->actions().isEmpty() ? nullptr : menu->actions().first();
+					QAction *up = new QAction(QStringLiteral("⬆ Mettre à jour vers v%1 (auto)…")
+									  .arg(QString::fromStdString(remote)),
+								  menu);
+					QObject::connect(up, &QAction::triggered, [menu] {
+						if (QMessageBox::question(
+							    menu->parentWidget(), QStringLiteral("VX.Stream"),
+							    QStringLiteral("Installer la mise à jour maintenant ?\n\n"
+									   "OBS va se fermer, l'installateur s'ouvre, "
+									   "puis relancez OBS.")) == QMessageBox::Yes)
+							launch_update(menu->parentWidget());
+					});
+					menu->insertAction(first, up);
+					menu->insertSeparator(first);
+
+					if (!pluginNotified) {
+						write_notified(PLUGIN_NOTIFIED, remote);
+						// PLUGIN_VERSION est une variable extern (pas un littéral)
+						// → fromUtf8, pas QStringLiteral.
+						const auto choice = QMessageBox::question(
+							menu->parentWidget(), QStringLiteral("VX.Stream"),
+							QStringLiteral(
+								"Une mise à jour de VX.Stream est disponible "
+								"(v%1 → v%2).\n\nL'installer maintenant ? OBS se "
+								"fermera, puis relancez-le. (Aussi disponible à "
+								"tout moment via le menu VX.Stream.)")
+								.arg(QString::fromUtf8(PLUGIN_VERSION),
+								     QString::fromStdString(remote)),
+							QMessageBox::Yes | QMessageBox::No);
+						if (choice == QMessageBox::Yes)
+							launch_update(menu->parentWidget());
+					}
+				}
+			},
+			Qt::QueuedConnection);
+	});
+}
+
+void vx_updater_check_manual(QMenu *menu)
+{
+	if (manualBusy.exchange(true))
+		return; // une vérification manuelle tourne déjà
+	if (manualThread.joinable())
+		manualThread.join();
+
+	manualThread = std::thread([menu] {
+		const std::string remote = parse_version(http_get_body(VERSION_URL_PATH));
+		const std::string obsRemote = parse_version(http_get_body(OBS_VERSION_URL_PATH));
+		const std::string obsLocal = local_obs_version();
+		const bool pluginOutdated = !remote.empty() && is_newer(remote, PLUGIN_VERSION);
+		const bool obsOutdated = !obsRemote.empty() && !obsLocal.empty() && is_newer(obsRemote, obsLocal);
+
+		QMetaObject::invokeMethod(
+			menu,
+			[menu, remote, obsRemote, obsLocal, pluginOutdated, obsOutdated] {
+				manualBusy.store(false);
+				QWidget *parent = menu->parentWidget();
+
+				if (remote.empty() && obsRemote.empty()) {
+					QMessageBox::warning(parent, QStringLiteral("VX.Stream"),
+							     QStringLiteral(
+								     "Vérification impossible (réseau ou serveur "
+								     "indisponible). Réessayez plus tard."));
+					return;
+				}
+
+				const QString pluginLine =
+					remote.empty() ? QStringLiteral("VX.Stream : v%1 (vérification impossible)")
+								 .arg(QString::fromUtf8(PLUGIN_VERSION))
+					: pluginOutdated ? QStringLiteral("VX.Stream : v%1 → v%2 disponible")
+								   .arg(QString::fromUtf8(PLUGIN_VERSION),
+									QString::fromStdString(remote))
+							 : QStringLiteral("VX.Stream : v%1 — à jour ✓")
+								   .arg(QString::fromUtf8(PLUGIN_VERSION));
+				const QString obsLine =
+					obsRemote.empty() ? QStringLiteral("OBS Studio : vérification impossible")
+					: obsOutdated     ? QStringLiteral("OBS Studio : v%1 → v%2 disponible")
+								.arg(QString::fromStdString(obsLocal),
+								     QString::fromStdString(obsRemote))
+						      : QStringLiteral("OBS Studio : v%1 — à jour ✓")
+								.arg(QString::fromStdString(obsLocal));
+				const QString status = pluginLine + QStringLiteral("\n") + obsLine;
+
+				if (pluginOutdated) {
+					if (QMessageBox::question(
+						    parent, QStringLiteral("VX.Stream"),
+						    status + QStringLiteral(
+								     "\n\nInstaller la mise à jour de VX.Stream "
+								     "maintenant ? OBS va se fermer, "
+								     "l'installateur s'ouvre, puis relancez OBS."),
+						    QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
+						launch_update(parent);
+				} else if (obsOutdated) {
+					if (QMessageBox::question(
+						    parent, QStringLiteral("VX.Stream"),
+						    status + QStringLiteral("\n\nOuvrir la page de téléchargement "
+									    "d'OBS Studio ?"),
+						    QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
+						QDesktopServices::openUrl(QUrl(QString::fromUtf8(OBS_DOWNLOAD_URL)));
+				} else {
+					QMessageBox::information(parent, QStringLiteral("VX.Stream"), status);
 				}
 			},
 			Qt::QueuedConnection);

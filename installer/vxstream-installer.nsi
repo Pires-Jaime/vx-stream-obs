@@ -30,6 +30,13 @@ BrandingText "Valerix — valerix.stream"
 !define OBS_URL "https://github.com/obsproject/obs-studio/releases/download/32.0.4/OBS-Studio-32.0.4-Windows-x64-Installer.exe"
 
 ; ── Apparence ──────────────────────────────────────────────────────────────────
+; Icône Valerix (emblème VX.Stream) : celle de l'installateur ET celle du
+; raccourci « OBS Valerix ». Nous installons l'OBS OFFICIEL — impossible donc de
+; changer son écran de démarrage (ce serait un fork d'OBS à compiler et
+; maintenir) ; le raccourci à notre icône est ce qui donne l'identité visuelle
+; au lancement, sans rien forker.
+!define MUI_ICON "vxstream.ico"
+!define MUI_UNICON "vxstream.ico"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "VX.Stream pour OBS"
 !define MUI_WELCOMEPAGE_TEXT "Cet assistant installe vos outils Valerix dans OBS Studio :$\r$\n$\r$\n  • OBS Studio (uniquement s'il n'est pas déjà installé)$\r$\n  • le plugin VX.Stream (docks, menu, thème, multistream)$\r$\n  • le canvas vertical (TikTok / YouTube mobile)$\r$\n$\r$\nFermez OBS avant de continuer."
@@ -157,6 +164,21 @@ Fermez OBS Studio complètement puis relancez cet installateur."
   RMDir /r "$APPDATA\obs-studio\plugins\vertical-canvas"
 SectionEnd
 
+; Raccourci « OBS Valerix » : lance l'OBS officiel avec NOTRE icône. C'est
+; l'équivalent honnête d'un logo de démarrage maison — sans forker OBS.
+Section "Raccourci « OBS Valerix »" SecShortcut
+  SetShellVarContext all
+  SetOutPath "$INSTDIR"
+  File "vxstream.ico"
+  ; $INSTDIR = dossier d'OBS (détecté plus haut) ; l'exe y est toujours.
+  CreateShortCut "$DESKTOP\OBS Valerix.lnk" "$INSTDIR\bin\64bit\obs64.exe" "" "$INSTDIR\vxstream.ico" 0 \
+    SW_SHOWNORMAL "" "OBS Studio avec les outils Valerix"
+  CreateDirectory "$SMPROGRAMS\Valerix"
+  CreateShortCut "$SMPROGRAMS\Valerix\OBS Valerix.lnk" "$INSTDIR\bin\64bit\obs64.exe" "" \
+    "$INSTDIR\vxstream.ico" 0 SW_SHOWNORMAL "" "OBS Studio avec les outils Valerix"
+  DetailPrint "Raccourci « OBS Valerix » créé."
+SectionEnd
+
 Section "-post"
   WriteUninstaller "$INSTDIR\Uninstall-VXStream.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VXStream" \
@@ -173,6 +195,7 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecObs} "OBS Studio officiel — téléchargé et installé uniquement s'il est absent de cette machine."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecVx} "Docks Valerix, menu VX.Stream, thème, multistream et canvas vertical, directement dans OBS."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecShortcut} "Raccourci « OBS Valerix » (bureau et menu Démarrer) avec l'icône Valerix — lance l'OBS officiel."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 ; ── Désinstallation (retire NOS fichiers, jamais OBS) ─────────────────────────
@@ -181,6 +204,10 @@ Section "Uninstall"
   SetShellVarContext all
   RMDir /r "$APPDATA\obs-studio\plugins\vx-stream"
   RMDir /r "$APPDATA\obs-studio\plugins\vertical-canvas"
+  Delete "$DESKTOP\OBS Valerix.lnk"
+  Delete "$SMPROGRAMS\Valerix\OBS Valerix.lnk"
+  RMDir "$SMPROGRAMS\Valerix"
+  Delete "$INSTDIR\vxstream.ico"
   Delete "$INSTDIR\Uninstall-VXStream.exe"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VXStream"
 SectionEnd

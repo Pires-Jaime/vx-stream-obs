@@ -66,6 +66,16 @@ std::atomic<long long> s_selectedId{0}; // obs_sceneitem id sélectionné (0 = a
 // Guides de magnétisme actives (coordonnées canvas ; < 0 = aucune).
 std::atomic<float> s_snapV{-1.0f}, s_snapH{-1.0f};
 
+// Menu contextuel d'un item (renommer, masquer, ordre, remplir/adapter,
+// propriétés, supprimer…) : il est CONSTRUIT par le dock Sources, mais l'aperçu
+// doit pouvoir l'ouvrir au clic droit — comme l'aperçu principal d'OBS. L'aperçu
+// étant déclaré AVANT le dock Sources, on passe par ce relais, posé à la
+// création du dock et vidé à sa destruction. Thread UI uniquement.
+std::function<void(const QPoint &)> g_showItemMenu;
+// Défini plus bas (après les globaux des docks) — l'aperçu doit resynchroniser
+// les listes quand il change la sélection au clic droit.
+void vx_refresh_all();
+
 // Boîte englobante d'un item en coordonnées CANVAS (via sa transformation box).
 struct Box {
 	float x0, y0, x1, y1;
@@ -181,8 +191,46 @@ protected:
 		return vw > 1 ? 10.0f * (float)s_baseW.load() / vw : 12.0f;
 	}
 
+	// Item le plus haut sous le point canvas donné (du dessus vers le fond).
+	obs_sceneitem_t *itemAt(obs_scene_t *scene, float cx, float cy, Box *outBox = nullptr)
+	{
+		std::vector<obs_sceneitem_t *> items;
+		obs_scene_enum_items(
+			scene,
+			[](obs_scene_t *, obs_sceneitem_t *it, void *p) {
+				static_cast<std::vector<obs_sceneitem_t *> *>(p)->push_back(it);
+				return true;
+			},
+			&items);
+		for (auto rit = items.rbegin(); rit != items.rend(); ++rit) {
+			Box b;
+			if (sceneitem_box(*rit, &b) && cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1) {
+				if (outBox)
+					*outBox = b;
+				return *rit;
+			}
+		}
+		return nullptr;
+	}
+
 	void mousePressEvent(QMouseEvent *e) override
 	{
+		// Clic DROIT : sélectionne l'item sous le curseur (comme l'aperçu
+		// principal d'OBS) puis ouvre le menu complet du dock Sources.
+		if (e->button() == Qt::RightButton) {
+			float rx, ry;
+			obs_scene_t *rscene = current_scene();
+			if (rscene && toCanvas(e->position(), &rx, &ry)) {
+				obs_sceneitem_t *hit = itemAt(rscene, rx, ry);
+				if (hit) {
+					s_selectedId = (long long)obs_sceneitem_get_id(hit);
+					vx_refresh_all(); // la liste suit la sélection
+				}
+			}
+			if (s_selectedId.load() && g_showItemMenu)
+				g_showItemMenu(e->globalPosition().toPoint());
+			return;
+		}
 		if (e->button() != Qt::LeftButton)
 			return;
 		float cx, cy;
@@ -206,24 +254,8 @@ protected:
 		}
 
 		// 2) Sinon, sélection de l'item sous le curseur (du dessus vers le fond).
-		std::vector<obs_sceneitem_t *> items;
-		obs_scene_enum_items(
-			scene,
-			[](obs_scene_t *, obs_sceneitem_t *it, void *p) {
-				static_cast<std::vector<obs_sceneitem_t *> *>(p)->push_back(it);
-				return true;
-			},
-			&items);
-		obs_sceneitem_t *hit = nullptr;
 		Box hb{};
-		for (auto rit = items.rbegin(); rit != items.rend(); ++rit) {
-			Box b;
-			if (sceneitem_box(*rit, &b) && cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1) {
-				hit = *rit;
-				hb = b;
-				break;
-			}
-		}
+		obs_sceneitem_t *hit = itemAt(scene, cx, cy, &hb);
 		if (!hit) {
 			s_selectedId = 0;
 			return;
@@ -722,7 +754,7 @@ public:
 		auto *row = new QHBoxLayout();
 		auto *add = new QPushButton(QStringLiteral("＋ Scène"), this);
 		connect(add, &QPushButton::clicked, this, [this] { onAdd(); });
-		auto *del = new QPushButton(QStringLiteral("−"), this);
+		auto *del = new QPushButton(QStringLiteral("－"), this);
 		del->setFixedWidth(28);
 		del->setToolTip(QStringLiteral("Supprimer la scène"));
 		connect(del, &QPushButton::clicked, this, [this] { onRemove(); });
@@ -848,6 +880,11 @@ public:
 		list->setContextMenuPolicy(Qt::CustomContextMenu);
 		connect(list, &QListWidget::customContextMenuRequested, this,
 			[this](const QPoint &p) { showMenu(list->mapToGlobal(p)); });
+		// Le MÊME menu depuis l'aperçu (clic droit sur une source), comme dans
+		// l'aperçu principal d'OBS. Relais vidé dans vx_vert_dock_destroy.
+		g_showItemMenu = [this](const QPoint &g) {
+			showMenu(g);
+		};
 		// Sélectionner une source la surligne dans l'aperçu (pas de notify).
 		connect(list, &QListWidget::currentItemChanged, this, [](QListWidgetItem *it) {
 			if (it)
@@ -867,7 +904,7 @@ public:
 		menu->addAction(QStringLiteral("Caméra"), [this] { onAddCamera(); });
 		menu->addAction(QStringLiteral("Source navigateur (URL)…"), [this] { onAddBrowser(); });
 		add->setMenu(menu);
-		auto *del = new QPushButton(QStringLiteral("−"), this);
+		auto *del = new QPushButton(QStringLiteral("－"), this);
 		del->setFixedWidth(28);
 		del->setToolTip(QStringLiteral("Retirer la source"));
 		connect(del, &QPushButton::clicked, this, [this] { onRemove(); });
@@ -1159,6 +1196,7 @@ void vx_vert_dock_destroy(void)
 		return;
 	// Plus aucun rafraîchisseur ne doit tourner : les widgets vont disparaître.
 	g_refreshers.clear();
+	g_showItemMenu = nullptr; // la lambda capture le dock Sources : ne pas survivre
 	// L'obs_display est détruit ICI, synchronement : le canvas est libéré juste
 	// après (EXIT), et le retrait d'un dock peut être différé par Qt.
 	previewDock->destroyPreview();

@@ -4,27 +4,33 @@ Copyright (C) 2026 Valerix (Jaime Pires) <support@valerix.stream>
 SPDX-License-Identifier: GPL-2.0-or-later
 */
 
-// La session Valerix vit dans le cookie `sf_session` du gestionnaire de cookies
-// CEF partagé par tous les docks — le C++ n'y accède qu'indirectement :
-//   • lecture  : QCefCookieManager::CheckForCookie (asynchrone, callback sur un
-//                thread CEF → il FAUT repasser par le thread UI pour Qt) ;
-//   • purge    : DeleteCookies + FlushStore.
+// La session Valerix vit dans le CEF partagé par les docks ; le C++ ne peut pas
+// la lire directement. `QCefCookieManager::CheckForCookie` s'est révélé peu
+// fiable (le bouton « Se déconnecter » restait grisé même connecté) : la SOURCE
+// DE VÉRITÉ est donc la PAGE `/obs/account`, qui publie son état dans son titre
+// (« VXAUTH:1 » / « VXAUTH:0 ») — seul canal page → plugin de browser-panel.hpp.
+// L'état est mémorisé dans la config du module pour que le menu soit correct dès
+// le lancement d'OBS, avant toute ouverture de fenêtre.
 //
-// Connexion   → dialog web /obs/account (bouton Twitch ; le cookie posé y est
-//               celui des docks, donc ils sont connectés dans la foulée).
+// Connexion   → /obs/account (bouton Twitch). La page ajoute « CLOSE » à son
+//               titre quand elle vient d'un login : la fenêtre se referme seule,
+//               sans laisser le streamer devant le dashboard.
 // Déconnexion → /obs/account?logout=1 (invalide la session CÔTÉ SERVEUR) ET
 //               purge du cookie CEF : sans les deux, soit le jeton resterait
 //               valide, soit les docks resteraient connectés localement.
 
 #include <obs-module.h>
+#include <obs-frontend-api.h>
 #include <plugin-support.h>
+#include <util/platform.h>
 
 #include <QAction>
 #include <QMenu>
 #include <QMessageBox>
-#include <QMetaObject>
 
 #include <browser-panel.hpp>
+
+#include <string>
 
 #include "vx-account.hpp"
 #include "vx-webdialog.hpp"
@@ -35,33 +41,73 @@ namespace {
 
 const char *SITE = "https://valerix.stream";
 const char *SESSION_COOKIE = "sf_session";
+const char *ACCOUNT_URL = "https://valerix.stream/obs/account";
+const char *STATE_FILE = "account-logged.txt";
 
-// Dernier état connu — sert d'affichage immédiat à l'ouverture du menu, le
-// temps que la vérification asynchrone réponde (elle rafraîchira les libellés).
-bool lastKnownLogged = false;
+QAction *g_login = nullptr;
+QAction *g_logout = nullptr;
+bool g_logged = false;
 
-void refresh_actions(QAction *login, QAction *logout, bool logged)
+std::string state_path()
 {
-	lastKnownLogged = logged;
-	login->setText(logged ? QStringLiteral("👤 Mon compte Valerix…")
-			      : QStringLiteral("🔑 Se connecter à Valerix…"));
-	logout->setEnabled(logged);
+	char *dir = obs_module_config_path("");
+	if (dir) {
+		os_mkdirs(dir);
+		bfree(dir);
+	}
+	char *p = obs_module_config_path(STATE_FILE);
+	std::string s = p ? p : "";
+	bfree(p);
+	return s;
+}
+
+bool read_state()
+{
+	char *c = os_quick_read_utf8_file(state_path().c_str());
+	const bool v = c && c[0] == '1';
+	bfree(c);
+	return v;
+}
+
+void write_state(bool v)
+{
+	const char *s = v ? "1" : "0";
+	os_quick_write_utf8_file(state_path().c_str(), s, 1, false);
+}
+
+// Reflète l'état dans le menu : un seul bouton pertinent à la fois.
+void apply_state(bool logged)
+{
+	g_logged = logged;
+	if (g_login) {
+		g_login->setText(logged ? QStringLiteral("👤 Mon compte Valerix…")
+					: QStringLiteral("🔑 Se connecter à Valerix…"));
+	}
+	if (g_logout)
+		g_logout->setVisible(logged); // masqué (pas grisé) quand déconnecté
 }
 
 } // namespace
+
+bool vx_account_is_logged(void)
+{
+	return g_logged;
+}
+
+void vx_account_open(void)
+{
+	vx_webdialog_open("VX.Stream — Mon compte", ACCOUNT_URL, 460, 560);
+}
 
 void vx_account_add_menu(QMenu *menu)
 {
 	QMenu *account = menu->addMenu(QStringLiteral("Compte"));
 
-	QAction *login = account->addAction(QStringLiteral("🔑 Se connecter à Valerix…"));
-	QObject::connect(login, &QAction::triggered, [] {
-		vx_webdialog_open("VX.Stream — Mon compte", "https://valerix.stream/obs/account", 460, 520);
-	});
+	g_login = account->addAction(QStringLiteral("🔑 Se connecter à Valerix…"));
+	QObject::connect(g_login, &QAction::triggered, [] { vx_account_open(); });
 
-	QAction *logout = account->addAction(QStringLiteral("🚪 Se déconnecter"));
-	logout->setEnabled(false); // activé dès qu'une session est détectée
-	QObject::connect(logout, &QAction::triggered, [menu] {
+	g_logout = account->addAction(QStringLiteral("🚪 Se déconnecter"));
+	QObject::connect(g_logout, &QAction::triggered, [menu] {
 		if (QMessageBox::question(menu->parentWidget(), QStringLiteral("VX.Stream"),
 					  QStringLiteral("Se déconnecter de Valerix ?\n\nVos docks VX.Stream "
 							 "demanderont une nouvelle connexion.")) != QMessageBox::Yes)
@@ -74,22 +120,38 @@ void vx_account_add_menu(QMenu *menu)
 			cm->DeleteCookies(SITE, SESSION_COOKIE);
 			cm->FlushStore();
 		}
-		lastKnownLogged = false;
+		apply_state(false);
+		write_state(false);
 		obs_log(LOG_INFO, "compte : déconnexion demandée");
 	});
 
-	// À chaque ouverture du menu : relecture réelle du cookie (l'utilisateur a
-	// pu se connecter dans un dock entre-temps).
-	QObject::connect(account, &QMenu::aboutToShow, [login, logout] {
-		refresh_actions(login, logout, lastKnownLogged); // affichage immédiat
-		QCefCookieManager *cm = vx_get_cookies();
-		if (!cm)
+	// État persisté : le menu est juste dès l'ouverture d'OBS.
+	apply_state(read_state());
+
+	// La page nous dit l'état réel (et demande la fermeture après un login).
+	vx_webdialog_set_title_hook([](const QString &t) {
+		if (!t.startsWith(QStringLiteral("VXAUTH:")))
 			return;
-		cm->CheckForCookie(SITE, SESSION_COOKIE, [login, logout](bool exists) {
-			// Callback sur un thread CEF → Qt exige le thread UI.
-			QMetaObject::invokeMethod(
-				login, [login, logout, exists] { refresh_actions(login, logout, exists); },
-				Qt::QueuedConnection);
-		});
+		const QString rest = t.mid(7);
+		const bool logged = rest.startsWith(QLatin1Char('1'));
+		if (logged != g_logged) {
+			apply_state(logged);
+			write_state(logged);
+			obs_log(LOG_INFO, "compte : %s", logged ? "connecté" : "déconnecté");
+		}
+		// « VXAUTH:1CLOSE » → on sort d'un login (ou d'une déconnexion) : la
+		// fenêtre a fini son office, on la referme au lieu d'afficher le site.
+		if (rest.contains(QStringLiteral("CLOSE")))
+			vx_webdialog_close();
 	});
+}
+
+void vx_account_require_login(void)
+{
+	if (g_logged)
+		return;
+	// Connexion OBLIGATOIRE avant d'utiliser le plugin : sans session, les docks
+	// n'affichent qu'un écran de connexion — autant l'ouvrir tout de suite.
+	obs_log(LOG_INFO, "compte : aucune session connue, ouverture de la connexion");
+	vx_account_open();
 }

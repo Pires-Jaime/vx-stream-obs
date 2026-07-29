@@ -166,6 +166,11 @@ static void add_vx_menu(void)
 
 	// Vérification de mise à jour en arrière-plan (jamais bloquant).
 	vx_updater_check(menu);
+
+	// Sans compte Valerix, les docks n'affichent qu'un écran de connexion :
+	// autant proposer la connexion tout de suite plutôt que de laisser
+	// découvrir des panneaux vides.
+	vx_account_require_login();
 }
 
 static void on_frontend_event(enum obs_frontend_event event, void *)

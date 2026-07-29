@@ -168,9 +168,15 @@ SectionEnd
 ; l'équivalent honnête d'un logo de démarrage maison — sans forker OBS.
 Section "Raccourci « OBS Valerix »" SecShortcut
   SetShellVarContext all
+  ; L'icône est déposée à la racine d'OBS…
   SetOutPath "$INSTDIR"
   File "vxstream.ico"
-  ; $INSTDIR = dossier d'OBS (détecté plus haut) ; l'exe y est toujours.
+
+  ; …mais le raccourci DOIT démarrer dans bin\64bit : NSIS fixe le « Démarrer
+  ; dans » du raccourci d'après le DERNIER SetOutPath, et OBS lancé depuis un
+  ; autre dossier ne retrouve ni ses thèmes ni ses données (« Failed to load
+  ; theme »). C'est aussi ce que fait le raccourci officiel d'OBS.
+  SetOutPath "$INSTDIR\bin\64bit"
   CreateShortCut "$DESKTOP\OBS Valerix.lnk" "$INSTDIR\bin\64bit\obs64.exe" "" "$INSTDIR\vxstream.ico" 0 \
     SW_SHOWNORMAL "" "OBS Studio avec les outils Valerix"
   CreateDirectory "$SMPROGRAMS\Valerix"

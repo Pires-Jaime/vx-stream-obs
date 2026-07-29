@@ -26,6 +26,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -41,10 +42,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <graphics/matrix4.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -62,7 +66,64 @@ obs_scene_t *current_scene();
 // la sélection l'inverse. Un décalage d'une frame est sans conséquence.
 std::atomic<int> s_vpX{0}, s_vpY{0}, s_vpW{1}, s_vpH{1}; // viewport en px physiques
 std::atomic<int> s_baseW{1080}, s_baseH{1920};
-std::atomic<long long> s_selectedId{0}; // obs_sceneitem id sélectionné (0 = aucun)
+std::atomic<long long> s_selectedId{0}; // sélection PRINCIPALE (porte les poignées ; 0 = aucune)
+
+// Sélection MULTIPLE (Ctrl+clic). `s_selectedId` reste la « principale » : c'est
+// elle qui affiche les poignées et la rotation — redimensionner/pivoter tout un
+// groupe demanderait une transformation de groupe, hors sujet ici. Le vecteur
+// est lu par le thread GRAPHIQUE (draw) → mutex, mais la section critique se
+// limite à la copie de quelques entiers.
+std::mutex s_selMutex;
+std::vector<long long> s_selection;
+
+std::vector<long long> selection_copy()
+{
+	std::lock_guard<std::mutex> g(s_selMutex);
+	return s_selection;
+}
+size_t selection_count()
+{
+	std::lock_guard<std::mutex> g(s_selMutex);
+	return s_selection.size();
+}
+bool selection_contains(long long id)
+{
+	std::lock_guard<std::mutex> g(s_selMutex);
+	return std::find(s_selection.begin(), s_selection.end(), id) != s_selection.end();
+}
+void selection_set(long long id)
+{
+	{
+		std::lock_guard<std::mutex> g(s_selMutex);
+		s_selection.clear();
+		if (id)
+			s_selection.push_back(id);
+	}
+	s_selectedId = id;
+}
+void selection_clear()
+{
+	{
+		std::lock_guard<std::mutex> g(s_selMutex);
+		s_selection.clear();
+	}
+	s_selectedId = 0;
+}
+// Ctrl+clic : ajoute/retire du groupe. L'item ajouté devient la principale ; si
+// on retire la principale, une autre reprend le rôle (sinon plus de poignées).
+void selection_toggle(long long id)
+{
+	std::lock_guard<std::mutex> g(s_selMutex);
+	auto it = std::find(s_selection.begin(), s_selection.end(), id);
+	if (it != s_selection.end()) {
+		s_selection.erase(it);
+		if (s_selectedId.load() == id)
+			s_selectedId = s_selection.empty() ? 0 : s_selection.back();
+	} else {
+		s_selection.push_back(id);
+		s_selectedId = id;
+	}
+}
 // Guides de magnétisme actives (coordonnées canvas ; < 0 = aucune).
 std::atomic<float> s_snapV{-1.0f}, s_snapH{-1.0f};
 
@@ -121,6 +182,68 @@ void apply_aabb(obs_sceneitem_t *item, const Box &b)
 	obs_sceneitem_set_info2(item, &ti);
 }
 
+// Rotation d'un vecteur (degrés). Sert à passer un déplacement souris du repère
+// CANVAS au repère LOCAL de l'item quand celui-ci est pivoté.
+void rotate_vec(float x, float y, float deg, float *ox, float *oy)
+{
+	const float r = deg * 3.14159265358979f / 180.0f;
+	const float c = std::cos(r), s = std::sin(r);
+	*ox = x * c - y * s;
+	*oy = x * s + y * c;
+}
+
+float item_rot(obs_sceneitem_t *item)
+{
+	obs_transform_info ti;
+	obs_sceneitem_get_info2(item, &ti);
+	return ti.rot;
+}
+
+void set_item_rot(obs_sceneitem_t *item, float deg)
+{
+	obs_transform_info ti;
+	obs_sceneitem_get_info2(item, &ti);
+	// Normalisée dans [0,360) : évite d'accumuler 720°, 1080°… dans le fichier.
+	float d = std::fmod(deg, 360.0f);
+	if (d < 0.0f)
+		d += 360.0f;
+	ti.rot = d;
+	obs_sceneitem_set_info2(item, &ti);
+}
+
+// Redimensionnement d'un item PIVOTÉ : la boîte écran (AABB) ne dit plus rien de
+// ses dimensions réelles, on travaille donc sur `bounds` dans le repère local et
+// on décale `pos` pour que le bord opposé reste ancré.
+void resize_rotated(obs_sceneitem_t *item, const vec2 &startBounds, const vec2 &startPos, float rot, float dx, float dy,
+		    bool left, bool right, bool top, bool bottom)
+{
+	float lx, ly;
+	rotate_vec(dx, dy, -rot, &lx, &ly); // déplacement souris → repère local
+	const float sx = right ? lx : (left ? -lx : 0.0f);
+	const float sy = bottom ? ly : (top ? -ly : 0.0f);
+
+	vec2 nb;
+	nb.x = std::max(16.0f, startBounds.x + sx);
+	nb.y = std::max(16.0f, startBounds.y + sy);
+
+	// Le centre se déplace de la MOITIÉ de l'agrandissement, du côté tiré.
+	const float cxl = (right ? 1.0f : (left ? -1.0f : 0.0f)) * (nb.x - startBounds.x) / 2.0f;
+	const float cyl = (bottom ? 1.0f : (top ? -1.0f : 0.0f)) * (nb.y - startBounds.y) / 2.0f;
+	float wx, wy;
+	rotate_vec(cxl, cyl, rot, &wx, &wy); // décalage local → repère canvas
+
+	obs_transform_info ti;
+	obs_sceneitem_get_info2(item, &ti);
+	ti.alignment = OBS_ALIGN_CENTER;
+	ti.bounds_alignment = OBS_ALIGN_CENTER;
+	if (ti.bounds_type == OBS_BOUNDS_NONE)
+		ti.bounds_type = OBS_BOUNDS_SCALE_INNER;
+	ti.bounds = nb;
+	ti.pos.x = startPos.x + wx;
+	ti.pos.y = startPos.y + wy;
+	obs_sceneitem_set_info2(item, &ti);
+}
+
 // ── Aperçu INTERACTIF : QWidget natif + obs_display + souris ─────────────────
 
 class VertPreview : public QWidget {
@@ -133,6 +256,8 @@ public:
 		setMinimumHeight(160);
 		setMouseTracking(true);
 		setCursor(Qt::OpenHandCursor);
+		// Sans focus clavier, Suppr / flèches / Échap n'arriveraient jamais.
+		setFocusPolicy(Qt::StrongFocus);
 	}
 
 	~VertPreview() override { destroyDisplay(); }
@@ -148,8 +273,8 @@ public:
 		}
 	}
 
-	// Sélection depuis la liste des sources (thread UI).
-	void selectExternally(long long id) { s_selectedId = id; }
+	// Sélection depuis la liste des sources (thread UI) : remplace le groupe.
+	void selectExternally(long long id) { selection_set(id); }
 
 protected:
 	void showEvent(QShowEvent *e) override
@@ -223,7 +348,13 @@ protected:
 			if (rscene && toCanvas(e->position(), &rx, &ry)) {
 				obs_sceneitem_t *hit = itemAt(rscene, rx, ry);
 				if (hit) {
-					s_selectedId = (long long)obs_sceneitem_get_id(hit);
+					const long long hid = (long long)obs_sceneitem_get_id(hit);
+					// Clic droit sur un membre du groupe : on garde le groupe
+					// (il devient juste la principale) ; sinon sélection simple.
+					if (selection_contains(hid))
+						s_selectedId = hid;
+					else
+						selection_set(hid);
 					vx_refresh_all(); // la liste suit la sélection
 				}
 			}
@@ -233,6 +364,7 @@ protected:
 		}
 		if (e->button() != Qt::LeftButton)
 			return;
+		setFocus(Qt::MouseFocusReason); // pour recevoir les raccourcis clavier
 		float cx, cy;
 		if (!toCanvas(e->position(), &cx, &cy))
 			return;
@@ -241,11 +373,17 @@ protected:
 		if (!scene)
 			return;
 
-		// 1) Une poignée de l'item déjà sélectionné a-t-elle été saisie ?
+		// 1) Poignées de l'item PRINCIPAL — uniquement en sélection simple :
+		// redimensionner/pivoter tout un groupe demanderait une transformation de
+		// groupe, on garde donc le geste sans ambiguïté.
 		const long long sel = s_selectedId.load();
 		obs_sceneitem_t *selItem = sel ? obs_scene_find_sceneitem_by_id(scene, sel) : nullptr;
 		Box sb;
-		if (selItem && sceneitem_box(selItem, &sb)) {
+		if (selItem && selection_count() == 1 && sceneitem_box(selItem, &sb)) {
+			if (rotHandleAt(sb, cx, cy)) {
+				beginDrag(selItem, Rotate, sb, cx, cy);
+				return;
+			}
 			const int h = handleAt(sb, cx, cy);
 			if (h >= 0) {
 				beginDrag(selItem, (DragMode)(Resize0 + h), sb, cx, cy);
@@ -256,12 +394,107 @@ protected:
 		// 2) Sinon, sélection de l'item sous le curseur (du dessus vers le fond).
 		Box hb{};
 		obs_sceneitem_t *hit = itemAt(scene, cx, cy, &hb);
+		const bool ctrl = e->modifiers().testFlag(Qt::ControlModifier);
 		if (!hit) {
-			s_selectedId = 0;
+			if (!ctrl)
+				selection_clear(); // clic dans le vide = tout désélectionner
+			vx_refresh_all();
 			return;
 		}
-		s_selectedId = (long long)obs_sceneitem_get_id(hit);
+		const long long hitId = (long long)obs_sceneitem_get_id(hit);
+		if (ctrl) {
+			selection_toggle(hitId); // Ctrl+clic : ajoute/retire du groupe
+			vx_refresh_all();
+			return; // pas de déplacement : le geste servait à sélectionner
+		}
+		// Cliquer un item DÉJÀ dans le groupe conserve le groupe (on déplace tout) ;
+		// sinon le clic repart d'une sélection simple.
+		if (!selection_contains(hitId))
+			selection_set(hitId);
+		else
+			s_selectedId = hitId;
+		vx_refresh_all();
 		beginDrag(hit, Move, hb, cx, cy);
+	}
+
+	// Raccourcis clavier de l'aperçu (parité avec l'aperçu principal d'OBS).
+	void keyPressEvent(QKeyEvent *e) override
+	{
+		obs_scene_t *scene = current_scene();
+		if (!scene) {
+			QWidget::keyPressEvent(e);
+			return;
+		}
+		const auto ids = selection_copy();
+
+		if (e->key() == Qt::Key_Escape) {
+			selection_clear();
+			vx_refresh_all();
+			return;
+		}
+		if (e->matches(QKeySequence::SelectAll)) { // Ctrl+A
+			std::vector<long long> all;
+			obs_scene_enum_items(
+				scene,
+				[](obs_scene_t *, obs_sceneitem_t *it, void *p) {
+					static_cast<std::vector<long long> *>(p)->push_back(
+						(long long)obs_sceneitem_get_id(it));
+					return true;
+				},
+				&all);
+			{
+				std::lock_guard<std::mutex> g(s_selMutex);
+				s_selection = all;
+			}
+			if (!all.empty())
+				s_selectedId = all.back();
+			vx_refresh_all();
+			return;
+		}
+		if (ids.empty()) {
+			QWidget::keyPressEvent(e);
+			return;
+		}
+		if (e->key() == Qt::Key_Delete || e->key() == Qt::Key_Backspace) {
+			for (long long id : ids)
+				if (obs_sceneitem_t *it = obs_scene_find_sceneitem_by_id(scene, id))
+					obs_sceneitem_remove(it);
+			selection_clear();
+			vx_vert_save();
+			vx_refresh_all();
+			return;
+		}
+		// Flèches : 1 px, ou 10 px avec Maj (les « nudge » habituels).
+		float dx = 0, dy = 0;
+		const float step = e->modifiers().testFlag(Qt::ShiftModifier) ? 10.0f : 1.0f;
+		switch (e->key()) {
+		case Qt::Key_Left:
+			dx = -step;
+			break;
+		case Qt::Key_Right:
+			dx = step;
+			break;
+		case Qt::Key_Up:
+			dy = -step;
+			break;
+		case Qt::Key_Down:
+			dy = step;
+			break;
+		default:
+			QWidget::keyPressEvent(e);
+			return;
+		}
+		for (long long id : ids) {
+			obs_sceneitem_t *it = obs_scene_find_sceneitem_by_id(scene, id);
+			if (!it)
+				continue;
+			obs_transform_info ti;
+			obs_sceneitem_get_info2(it, &ti);
+			ti.pos.x += dx;
+			ti.pos.y += dy;
+			obs_sceneitem_set_info2(it, &ti);
+		}
+		vx_vert_save();
 	}
 
 	void mouseMoveEvent(QMouseEvent *e) override
@@ -280,6 +513,19 @@ protected:
 
 		const float W = (float)s_baseW.load(), H = (float)s_baseH.load();
 		const float dx = cx - grabCx, dy = cy - grabCy;
+
+		// Rotation : l'angle suit le curseur autour du centre de l'item. La
+		// poignée pointant vers le HAUT, on retire 90° pour que 0° = non pivoté.
+		// Maj = pas de 15°, pour retomber sur des angles nets.
+		if (mode == Rotate) {
+			const float ccx = (startBox.x0 + startBox.x1) / 2, ccy = (startBox.y0 + startBox.y1) / 2;
+			float deg = std::atan2(cy - ccy, cx - ccx) * 180.0f / 3.14159265358979f + 90.0f;
+			if (e->modifiers().testFlag(Qt::ShiftModifier))
+				deg = std::round(deg / 15.0f) * 15.0f;
+			set_item_rot(dragItem, deg);
+			return;
+		}
+
 		Box b = startBox;
 		if (mode == Move) {
 			b.x0 += dx;
@@ -287,13 +533,35 @@ protected:
 			b.y0 += dy;
 			b.y1 += dy;
 			snapMove(&b, W, H);
-		} else {
+			// Le magnétisme s'applique à l'item saisi ; le groupe suit du MÊME
+			// décalage, sinon les positions relatives se déformeraient.
+			const float mdx = b.x0 - startBox.x0, mdy = b.y0 - startBox.y0;
+			for (auto &d : dragItems) {
+				Box nb = d.second;
+				nb.x0 += mdx;
+				nb.x1 += mdx;
+				nb.y0 += mdy;
+				nb.y1 += mdy;
+				apply_aabb(d.first, nb);
+			}
+			return;
+		}
+		{
 			// Redimensionnement : le bord/coin OPPOSÉ reste ancré.
 			const int h = mode - Resize0;
 			const bool left = (h == HTL || h == HL || h == HBL);
 			const bool right = (h == HTR || h == HR || h == HBR);
 			const bool top = (h == HTL || h == HT || h == HTR);
 			const bool bottom = (h == HBL || h == HB || h == HBR);
+
+			// Item PIVOTÉ : sa boîte écran ne représente plus ses dimensions →
+			// on redimensionne dans son repère local (et sans magnétisme, qui
+			// n'aurait pas de sens sur des bords obliques).
+			if (std::fabs(startRot) > 0.01f) {
+				resize_rotated(dragItem, startBounds, startPos, startRot, dx, dy, left, right, top,
+					       bottom);
+				return;
+			}
 			if (left)
 				b.x0 = startBox.x0 + dx;
 			if (right)
@@ -325,6 +593,7 @@ protected:
 		if (mode != None) {
 			mode = None;
 			dragItem = nullptr;
+			dragItems.clear();
 			s_snapV = s_snapH = -1.0f;
 			setCursor(Qt::OpenHandCursor);
 			vx_vert_save();
@@ -350,13 +619,41 @@ protected:
 private:
 	// Ordre des poignées : coins puis milieux de bords.
 	enum { HTL = 0, HT, HTR, HR, HBR, HB, HBL, HL, HCOUNT };
-	enum DragMode { None = 0, Move, Resize0 };
+	enum DragMode { None = 0, Move, Rotate, Resize0 };
 
 	obs_display_t *display = nullptr;
 	DragMode mode = None;
 	obs_sceneitem_t *dragItem = nullptr; // valide uniquement le temps d'un geste
 	Box startBox{};
 	float grabCx = 0, grabCy = 0;
+	// Transformation de l'item au DÉBUT du geste : nécessaire pour pivoter et
+	// pour redimensionner en repère local (la boîte écran ne suffit plus).
+	float startRot = 0.0f;
+	vec2 startBounds{};
+	vec2 startPos{};
+	// Groupe déplacé : (item, boîte au début du geste). Un seul élément en
+	// sélection simple ; tous les sélectionnés en déplacement de groupe.
+	std::vector<std::pair<obs_sceneitem_t *, Box>> dragItems;
+
+	// Distance de la poignée de rotation au-dessus du bord haut, en px ÉCRAN
+	// convertis en unités canvas (sinon elle collerait au bord sur un petit aperçu).
+	float rotHandleOffset() const
+	{
+		const int vw = s_vpW.load();
+		return vw > 1 ? 26.0f * (float)s_baseW.load() / vw : 30.0f;
+	}
+	void rotHandlePoint(const Box &b, float *x, float *y) const
+	{
+		*x = (b.x0 + b.x1) / 2;
+		*y = b.y0 - rotHandleOffset();
+	}
+	bool rotHandleAt(const Box &b, float cx, float cy) const
+	{
+		float hx, hy;
+		rotHandlePoint(b, &hx, &hy);
+		const float r = grabRadius();
+		return cx >= hx - r && cx <= hx + r && cy >= hy - r && cy <= hy + r;
+	}
 
 	static void handlePoint(const Box &b, int h, float *x, float *y)
 	{
@@ -416,7 +713,29 @@ private:
 		startBox = b;
 		grabCx = cx;
 		grabCy = cy;
-		setCursor(m == Move ? Qt::ClosedHandCursor : cursorForHandle(m - Resize0));
+
+		obs_transform_info ti;
+		obs_sceneitem_get_info2(item, &ti);
+		startRot = ti.rot;
+		startBounds = ti.bounds;
+		startPos = ti.pos;
+
+		// Composition du groupe figée au début du geste : les boîtes servent de
+		// référence pour appliquer un décalage commun.
+		dragItems.clear();
+		if (m == Move) {
+			obs_scene_t *scene = current_scene();
+			for (long long id : selection_copy()) {
+				obs_sceneitem_t *it = scene ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
+				Box ib;
+				if (it && sceneitem_box(it, &ib))
+					dragItems.push_back({it, ib});
+			}
+			if (dragItems.empty())
+				dragItems.push_back({item, b});
+		}
+		setCursor(m == Move ? Qt::ClosedHandCursor
+				    : (m == Rotate ? Qt::CrossCursor : cursorForHandle(m - Resize0)));
 	}
 
 	static Qt::CursorShape cursorForHandle(int h)
@@ -442,7 +761,11 @@ private:
 		const long long sel = s_selectedId.load();
 		obs_sceneitem_t *item = (sel && scene) ? obs_scene_find_sceneitem_by_id(scene, sel) : nullptr;
 		Box b;
-		if (item && sceneitem_box(item, &b)) {
+		if (item && selection_count() == 1 && sceneitem_box(item, &b)) {
+			if (rotHandleAt(b, cx, cy)) {
+				setCursor(Qt::CrossCursor); // poignée de rotation
+				return;
+			}
 			const int h = handleAt(b, cx, cy);
 			if (h >= 0) {
 				setCursor(cursorForHandle(h));
@@ -523,7 +846,7 @@ private:
 			obs_display_add_draw_callback(display, &VertPreview::draw, nullptr);
 	}
 
-	// Contour + 8 poignées + guides de magnétisme, en coordonnées canvas.
+	// Contours du groupe + 8 poignées et rotation sur la principale + guides.
 	static void draw_selection(float cw, float ch)
 	{
 		const long long id = s_selectedId.load();
@@ -534,6 +857,8 @@ private:
 		Box b;
 		if (!item || !sceneitem_box(item, &b))
 			return;
+		const auto selIds = selection_copy();
+		const bool single = selIds.size() <= 1;
 
 		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 		gs_eparam_t *color = gs_effect_get_param_by_name(solid, "color");
@@ -567,20 +892,49 @@ private:
 		if (sh >= 0.0f)
 			rect(0.0f, sh - t / 2, cw, t);
 
-		// Contour de l'item.
-		setColor(0.486f, 0.227f, 0.929f); // #7c3aed
-		rect(b.x0, b.y0, b.x1 - b.x0, t);
-		rect(b.x0, b.y1 - t, b.x1 - b.x0, t);
-		rect(b.x0, b.y0, t, b.y1 - b.y0);
-		rect(b.x1 - t, b.y0, t, b.y1 - b.y0);
+		auto outline = [&](const Box &ob) {
+			rect(ob.x0, ob.y0, ob.x1 - ob.x0, t);
+			rect(ob.x0, ob.y1 - t, ob.x1 - ob.x0, t);
+			rect(ob.x0, ob.y0, t, ob.y1 - ob.y0);
+			rect(ob.x1 - t, ob.y0, t, ob.y1 - ob.y0);
+		};
 
-		// Poignées (blanches, bien visibles sur n'importe quel fond).
-		setColor(1.0f, 1.0f, 1.0f);
-		const float mx = (b.x0 + b.x1) / 2, my = (b.y0 + b.y1) / 2;
-		const float hx[HCOUNT] = {b.x0, mx, b.x1, b.x1, b.x1, mx, b.x0, b.x0};
-		const float hy[HCOUNT] = {b.y0, b.y0, b.y0, my, b.y1, b.y1, b.y1, my};
-		for (int i = 0; i < HCOUNT; i++)
-			rect(hx[i] - hs, hy[i] - hs, hs * 2, hs * 2);
+		// Les AUTRES membres du groupe : contour plus pâle, sans poignées — on
+		// voit ce qui bougera, sans laisser croire qu'on peut les redimensionner.
+		if (!single) {
+			setColor(0.65f, 0.55f, 0.95f);
+			for (long long sid : selIds) {
+				if (sid == id)
+					continue;
+				obs_sceneitem_t *it = obs_scene_find_sceneitem_by_id(scene, sid);
+				Box ob;
+				if (it && sceneitem_box(it, &ob))
+					outline(ob);
+			}
+		}
+
+		// Contour de l'item principal.
+		setColor(0.486f, 0.227f, 0.929f); // #7c3aed
+		outline(b);
+
+		// Poignées (blanches, bien visibles sur n'importe quel fond) : seulement
+		// en sélection simple — cf. mousePressEvent.
+		if (single) {
+			setColor(1.0f, 1.0f, 1.0f);
+			const float mx = (b.x0 + b.x1) / 2, my = (b.y0 + b.y1) / 2;
+			const float hx[HCOUNT] = {b.x0, mx, b.x1, b.x1, b.x1, mx, b.x0, b.x0};
+			const float hy[HCOUNT] = {b.y0, b.y0, b.y0, my, b.y1, b.y1, b.y1, my};
+			for (int i = 0; i < HCOUNT; i++)
+				rect(hx[i] - hs, hy[i] - hs, hs * 2, hs * 2);
+
+			// Poignée de ROTATION : au-dessus du bord haut, reliée par une tige.
+			const int vwl = s_vpW.load();
+			const float off = vwl > 1 ? 26.0f * cw / vwl : 30.0f;
+			const float ry = b.y0 - off;
+			rect(mx - t / 2, ry, t, off);           // tige
+			setColor(0.98f, 0.75f, 0.14f);          // ambre : ne pas la confondre
+			rect(mx - hs, ry - hs, hs * 2, hs * 2); // poignée
+		}
 
 		gs_technique_end_pass(tech);
 		gs_technique_end(tech);
@@ -1111,6 +1465,39 @@ private:
 			obs_sceneitem_set_locked(item, !locked);
 			vx_vert_save();
 			vx_refresh_all();
+		});
+
+		// ── Rotation : angles nets au menu ; l'aperçu a une poignée pour le
+		// libre (Maj = pas de 15°).
+		m.addSeparator();
+		QMenu *rotMenu = m.addMenu(QStringLiteral("Rotation"));
+		const float cur = item_rot(item);
+		rotMenu->addAction(QStringLiteral("↻ 90° à droite"), [item, cur] {
+			set_item_rot(item, cur + 90.0f);
+			vx_vert_save();
+		});
+		rotMenu->addAction(QStringLiteral("↺ 90° à gauche"), [item, cur] {
+			set_item_rot(item, cur - 90.0f);
+			vx_vert_save();
+		});
+		rotMenu->addAction(QStringLiteral("180°"), [item, cur] {
+			set_item_rot(item, cur + 180.0f);
+			vx_vert_save();
+		});
+		rotMenu->addSeparator();
+		rotMenu->addAction(QStringLiteral("Angle précis…"), [this, item, cur] {
+			bool ok = false;
+			const double v = QInputDialog::getDouble(this, QStringLiteral("Rotation"),
+								 QStringLiteral("Angle (degrés) :"), cur, -360.0, 360.0,
+								 1, &ok);
+			if (ok) {
+				set_item_rot(item, (float)v);
+				vx_vert_save();
+			}
+		});
+		rotMenu->addAction(QStringLiteral("Réinitialiser (0°)"), [item] {
+			set_item_rot(item, 0.0f);
+			vx_vert_save();
 		});
 
 		m.addSeparator();

@@ -33,6 +33,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <string>
 
 #include "vx-account.hpp"
+#include "vx-events.hpp"
 #include "vx-webdialog.hpp"
 
 extern QCefCookieManager *vx_get_cookies(void);
@@ -43,22 +44,45 @@ const char *SITE = "https://valerix.stream";
 const char *SESSION_COOKIE = "sf_session";
 const char *ACCOUNT_URL = "https://valerix.stream/obs/account";
 const char *STATE_FILE = "account-logged.txt";
+// Jeton d'évènements : persisté à part pour que le flux reparte dès le
+// lancement d'OBS, sans obliger à rouvrir la fenêtre « Mon compte ».
+const char *TOKEN_FILE = "events-token.txt";
 
 QAction *g_login = nullptr;
 QAction *g_logout = nullptr;
 bool g_logged = false;
 
-std::string state_path()
+std::string cfg_path(const char *file)
 {
 	char *dir = obs_module_config_path("");
 	if (dir) {
 		os_mkdirs(dir);
 		bfree(dir);
 	}
-	char *p = obs_module_config_path(STATE_FILE);
+	char *p = obs_module_config_path(file);
 	std::string s = p ? p : "";
 	bfree(p);
 	return s;
+}
+
+std::string state_path()
+{
+	return cfg_path(STATE_FILE);
+}
+
+std::string read_token()
+{
+	char *c = os_quick_read_utf8_file(cfg_path(TOKEN_FILE).c_str());
+	std::string t = c ? c : "";
+	bfree(c);
+	while (!t.empty() && (t.back() == '\n' || t.back() == '\r'))
+		t.pop_back();
+	return t;
+}
+
+void write_token(const std::string &t)
+{
+	os_quick_write_utf8_file(cfg_path(TOKEN_FILE).c_str(), t.c_str(), t.size(), false);
 }
 
 bool read_state()
@@ -127,6 +151,8 @@ void vx_account_add_menu(QMenu *menu)
 
 	// État persisté : le menu est juste dès l'ouverture d'OBS.
 	apply_state(read_state());
+	// Idem pour le jeton : le flux d'évènements démarre sans intervention.
+	vx_events_set_token(read_token());
 
 	// La page nous dit l'état réel (et demande la fermeture après un login).
 	vx_webdialog_set_title_hook([](const QString &t) {
@@ -139,6 +165,23 @@ void vx_account_add_menu(QMenu *menu)
 			write_state(logged);
 			obs_log(LOG_INFO, "compte : %s", logged ? "connecté" : "déconnecté");
 		}
+		// Suffixe « |T:<jeton> » : le flux d'évènements du plugin. Ajouté APRÈS
+		// les marqueurs existants, donc sans effet sur la lecture ci-dessus.
+		const int tpos = rest.indexOf(QStringLiteral("|T:"));
+		if (tpos >= 0) {
+			const std::string tok = rest.mid(tpos + 3).toStdString();
+			if (!tok.empty() && tok != read_token()) {
+				write_token(tok);
+				obs_log(LOG_INFO, "compte : jeton d'évènements enregistré");
+			}
+			vx_events_set_token(tok);
+		} else if (!logged) {
+			// Déconnexion : on oublie le jeton, sinon le flux continuerait de
+			// tourner pour un compte que le streamer vient de quitter.
+			write_token("");
+			vx_events_set_token("");
+		}
+
 		// « VXAUTH:1CLOSE » → on sort d'un login (ou d'une déconnexion) : la
 		// fenêtre a fini son office, on la referme au lieu d'afficher le site.
 		if (rest.contains(QStringLiteral("CLOSE")))

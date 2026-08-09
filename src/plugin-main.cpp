@@ -37,6 +37,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "vx-account.hpp"
 #include "vx-backup.hpp"
 #include "vx-docks.hpp"
+#include "vx-events.hpp"
 #include "vx-ms-dock.hpp"
 #include "vx-multistream.hpp"
 #include "vx-report.hpp"
@@ -215,6 +216,9 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 bool obs_module_load(void)
 {
 	vx_ms_load();
+	// Flux d'évènements Valerix : actions à exécuter sur ce PC (Voicemod…).
+	// Démarre systématiquement ; sans jeton connu il attend sagement.
+	vx_events_start();
 	obs_frontend_add_event_callback(on_frontend_event, nullptr);
 	obs_log(LOG_INFO, "VX.Stream chargé (version %s)", PLUGIN_VERSION);
 	return true;
@@ -226,6 +230,9 @@ void obs_module_unload(void)
 	// déchargement de la DLL → crash à la fermeture d'OBS dès qu'un événement
 	// tardif arrive (c'est le bug « OBS a planté » systématique à l'exit).
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
+	// AVANT les autres arrêts : le fil du flux peut être en train d'écrire dans
+	// le journal, et il doit être joint avant que la DLL ne se décharge.
+	vx_events_stop();
 	vx_updater_shutdown();
 	vx_report_shutdown();
 	vx_ms_shutdown();

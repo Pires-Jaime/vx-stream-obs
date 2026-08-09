@@ -21,6 +21,10 @@ if(ENABLE_FRONTEND_API)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
 endif()
 
+# Le plugin compile toujours avec libobs ; le garde permet de réutiliser
+# vx-events.cpp dans des tests hors OBS (analyseur SSE, extraction JSON).
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE VX_HAS_OBS)
+
 if(ENABLE_QT)
   find_package(Qt6 COMPONENTS Widgets Core)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
@@ -49,6 +53,8 @@ target_sources(
     src/vx-vertical.cpp
     src/vx-vertical-dock.cpp
     src/vx-backup.cpp
+    src/vx-voicemod.cpp
+    src/vx-events.cpp
     src/vx-account.cpp
     src/vx-webdialog.cpp
     src/vx-report.cpp

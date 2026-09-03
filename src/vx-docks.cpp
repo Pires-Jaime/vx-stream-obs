@@ -12,7 +12,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 // résout la session côté serveur et redirige vers le dock final. C'est ce qui
 // évite toute configuration par streamer dans le plugin : une seule connexion
 // Valerix dans n'importe quel dock (cookie manager PARTAGÉ et PERSISTANT) et
-// les quatre docks fonctionnent, même après relance d'OBS.
+// tous les docks fonctionnent, même après relance d'OBS.
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -45,6 +45,7 @@ static const VxDock DOCKS[] = {
 	{"vx_activity", "VX Activité", "https://valerix.stream/obs/dock/activity"},
 	{"vx_music", "VX Musique", "https://valerix.stream/obs/dock/music"},
 	{"vx_control", "VX Contrôle", "https://valerix.stream/obs/dock/control"},
+	{"vx_bridge", "VX Pont OBS", "https://valerix.stream/obs/dock/bridge"},
 };
 
 bool vx_docks_available(void)
@@ -74,7 +75,7 @@ bool vx_create_docks(void)
 	cef->init_browser(); // async — create_widget attend tout seul que CEF soit prêt
 
 	// Store de cookies dédié et persistant : la session Valerix survit aux
-	// relances d'OBS, et elle est partagée par les 4 docks.
+	// relances d'OBS, et elle est partagée par tous les docks.
 	cookies = cef->create_cookie_manager("vx-stream", true);
 
 	for (const VxDock &d : DOCKS) {
@@ -134,7 +135,16 @@ QAction *vx_dock_toggle_action(const char *id)
 
 const char *const *vx_dock_ids(size_t *count)
 {
-	static const char *ids[] = {"vx_chat", "vx_activity", "vx_music", "vx_control"};
-	*count = sizeof(ids) / sizeof(ids[0]);
-	return ids;
+	// Dérivé de DOCKS : la liste était dupliquée à la main, et un dock ajouté
+	// à DOCKS mais oublié ici n'était plus retiré par vx_destroy_docks — donc
+	// détruit par Qt APRÈS l'arrêt de CEF, exactement le crash de fermeture
+	// documenté plus haut. Une seule source, plus de divergence possible.
+	static std::vector<const char *> ids = [] {
+		std::vector<const char *> v;
+		for (const VxDock &d : DOCKS)
+			v.push_back(d.id);
+		return v;
+	}();
+	*count = ids.size();
+	return ids.data();
 }

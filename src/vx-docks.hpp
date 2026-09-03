@@ -8,7 +8,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 class QAction;
 
-/** Initialise CEF (via obs-browser) et enregistre les 4 docks VX. */
+/** Initialise CEF (via obs-browser) et enregistre les docks VX. */
 bool vx_create_docks(void);
 
 /** Retire les docks pendant que CEF est encore vivant (à appeler sur EXIT). */

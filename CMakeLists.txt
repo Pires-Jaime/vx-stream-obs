@@ -58,6 +58,7 @@ target_sources(
     src/vx-account.cpp
     src/vx-webdialog.cpp
     src/vx-report.cpp
+    src/vx-nowplaying.cpp
 )
 
 # browser-panel.hpp : interface QCef d'obs-browser (copie alignée sur le

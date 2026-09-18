@@ -38,6 +38,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "vx-backup.hpp"
 #include "vx-docks.hpp"
 #include "vx-events.hpp"
+#include "vx-nowplaying.hpp"
 #include "vx-ms-dock.hpp"
 #include "vx-multistream.hpp"
 #include "vx-report.hpp"
@@ -219,6 +220,7 @@ bool obs_module_load(void)
 	// Flux d'évènements Valerix : actions à exécuter sur ce PC (Voicemod…).
 	// Démarre systématiquement ; sans jeton connu il attend sagement.
 	vx_events_start();
+	vx_nowplaying_start();
 	obs_frontend_add_event_callback(on_frontend_event, nullptr);
 	obs_log(LOG_INFO, "VX.Stream chargé (version %s)", PLUGIN_VERSION);
 	return true;
@@ -233,6 +235,7 @@ void obs_module_unload(void)
 	// AVANT les autres arrêts : le fil du flux peut être en train d'écrire dans
 	// le journal, et il doit être joint avant que la DLL ne se décharge.
 	vx_events_stop();
+	vx_nowplaying_stop();
 	vx_updater_shutdown();
 	vx_report_shutdown();
 	vx_ms_shutdown();

@@ -34,6 +34,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "vx-account.hpp"
 #include "vx-events.hpp"
+#include "vx-nowplaying.hpp"
 #include "vx-webdialog.hpp"
 
 extern QCefCookieManager *vx_get_cookies(void);
@@ -153,6 +154,8 @@ void vx_account_add_menu(QMenu *menu)
 	apply_state(read_state());
 	// Idem pour le jeton : le flux d'évènements démarre sans intervention.
 	vx_events_set_token(read_token());
+	// Le lecteur de musique du PC utilise le MÊME jeton : rien de plus à appairer.
+	vx_nowplaying_set_token(read_token());
 
 	// La page nous dit l'état réel (et demande la fermeture après un login).
 	vx_webdialog_set_title_hook([](const QString &t) {
@@ -175,11 +178,13 @@ void vx_account_add_menu(QMenu *menu)
 				obs_log(LOG_INFO, "compte : jeton d'évènements enregistré");
 			}
 			vx_events_set_token(tok);
+			vx_nowplaying_set_token(tok);
 		} else if (!logged) {
 			// Déconnexion : on oublie le jeton, sinon le flux continuerait de
 			// tourner pour un compte que le streamer vient de quitter.
 			write_token("");
 			vx_events_set_token("");
+			vx_nowplaying_set_token("");
 		}
 
 		// « VXAUTH:1CLOSE » → on sort d'un login (ou d'une déconnexion) : la

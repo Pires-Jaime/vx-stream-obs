@@ -8,6 +8,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -20,8 +22,45 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 namespace {
 
+// ⚠️ Seuls le jeton et son verrou vivent hors du bloc Windows : ce sont les
+// seuls que `vx_nowplaying_set_token` touche sur toutes les plateformes. Tout
+// le reste (fil, boucle, aides JSON) est INUTILE ailleurs, et Xcode compile
+// avec -Werror : une variable inutilisée y casse la compilation de tout le
+// plugin. C'est ce qui a fait échouer la 0.23.0 sur macOS.
 std::mutex g_mtx;
 std::string g_token;
+
+} // namespace
+
+#ifdef _WIN32
+
+// ⚠️ C++/WinRT AVANT <windows.h>, et les macros de compatibilité : sans
+// NOMINMAX, les macros min/max de Windows cassent les en-têtes WinRT, et
+// WIN32_LEAN_AND_MEAN évite la collision GetCurrentTime.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Media.Control.h>
+
+#include <windows.h>
+#include <wininet.h>
+
+#pragma comment(lib, "wininet.lib")
+// ⚠️ Indispensable : les fonctions d'exécution de WinRT (RoInitialize…) vivent
+// ici. Sans cette bibliothèque, la compilation passe et c'est l'ÉDITION DE
+// LIENS qui échoue, avec des symboles non résolus incompréhensibles.
+#pragma comment(lib, "windowsapp.lib")
+
+using namespace winrt;
+using namespace winrt::Windows::Media::Control;
+
+namespace {
+
 std::atomic<bool> g_run{false};
 std::thread g_thread;
 
@@ -67,22 +106,6 @@ std::string json_escape(const std::string &s)
 	}
 	return out;
 }
-
-} // namespace
-
-#ifdef _WIN32
-
-#include <windows.h>
-#include <wininet.h>
-#pragma comment(lib, "wininet.lib")
-
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Media.Control.h>
-
-using namespace winrt;
-using namespace winrt::Windows::Media::Control;
-
-namespace {
 
 /** UTF-16 (Windows) → UTF-8 (notre API). */
 std::string utf8(const winrt::hstring &h)

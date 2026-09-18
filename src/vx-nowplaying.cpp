@@ -4,7 +4,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
 */
 
 #include "vx-nowplaying.hpp"
-#include "plugin-support.h"
+
+// ⚠️ ORDRE IMPOSÉ : <obs-module.h> AVANT <plugin-support.h>, comme dans tous les
+// autres modules. `plugin-support.h` redéclare `blogva` sans le marqueur
+// d'export de libobs ; si elle passe en premier, MSVC voit deux déclarations de
+// liaison différente et refuse de compiler :
+//   util/base.h(77): error C2375: 'blogva': redefinition; different linkage
+// C'est ce qui a fait échouer le build Windows de la 0.23.1 — et uniquement lui,
+// Clang et GCC tolèrent l'ordre inverse.
+#ifdef VX_HAS_OBS
+#include <obs-module.h>
+#include <plugin-support.h>
+#else
+#define obs_log(...)
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -13,12 +26,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <mutex>
 #include <string>
 #include <thread>
-
-#ifdef VX_HAS_OBS
-#include <obs-module.h>
-#else
-#define obs_log(...)
-#endif
 
 namespace {
 

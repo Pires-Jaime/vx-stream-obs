@@ -35,6 +35,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QUrl>
 
 #include "vx-account.hpp"
+#include "vx-backtrack.hpp"
 #include "vx-backup.hpp"
 #include "vx-docks.hpp"
 #include "vx-events.hpp"
@@ -97,6 +98,40 @@ static void add_vx_menu(void)
 	}
 
 	menu->addSeparator();
+
+	// Case à cocher « scènes liées » : juste sous les docks, là où on règle le
+	// comportement du 9:16.
+	QAction *lien = menu->addAction(QStringLiteral("Scènes verticales liées"));
+	lien->setCheckable(true);
+	lien->setChecked(vx_vert_linked());
+	lien->setToolTip(QStringLiteral("La scène verticale suit la scène OBS quand les deux portent le même nom."));
+	QObject::connect(lien, &QAction::toggled, [](bool on) { vx_vert_set_linked(on); });
+
+	// Backtrack : case d'activation + enregistrement manuel. Le raccourci
+	// clavier se règle dans Paramètres → Raccourcis (« VX Backtrack »).
+	QMenu *bt = menu->addMenu(QStringLiteral("Backtrack vertical"));
+	QAction *btOn = bt->addAction(QStringLiteral("Activer pendant le direct"));
+	btOn->setCheckable(true);
+	btOn->setChecked(vx_backtrack_enabled());
+	btOn->setToolTip(QStringLiteral("Garde les dernières secondes du canvas 9:16 en mémoire. "
+					"Encode en continu : à n'allumer que si vous vous en servez."));
+	QObject::connect(btOn, &QAction::toggled, [](bool on) { vx_backtrack_set_enabled(on); });
+	QAction *btSave = bt->addAction(QStringLiteral("💾 Enregistrer l'extrait maintenant"));
+	QObject::connect(btSave, &QAction::triggered, [] { vx_backtrack_save(); });
+	bt->addSeparator();
+	for (int s : {60, 120, 180, 300}) {
+		QAction *a = bt->addAction(QStringLiteral("Durée : %1 s").arg(s));
+		a->setCheckable(true);
+		a->setChecked(vx_backtrack_seconds() == s);
+		QObject::connect(a, &QAction::triggered, [s, bt] {
+			vx_backtrack_set_seconds(s);
+			// Les durées sont exclusives : on décoche les autres à la main,
+			// un QActionGroup serait plus lourd pour quatre entrées.
+			for (QAction *x : bt->actions())
+				if (x->isCheckable() && x->text().startsWith(QStringLiteral("Durée")))
+					x->setChecked(x->text() == QStringLiteral("Durée : %1 s").arg(s));
+		});
+	}
 
 	QAction *theme = menu->addAction(QStringLiteral("Activer le thème Valerix…"));
 	QObject::connect(theme, &QAction::triggered, [window] {
@@ -185,23 +220,35 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		vx_ms_dock_create(); // avant le menu : il récupère son toggleViewAction
 		vx_vert_init();      // le canvas AVANT son dock (l'aperçu le référence)
 		vx_vert_dock_create();
+		vx_backtrack_init(); // raccourci clavier + réglages, avant le menu
 		themeInstalled = vx_install_theme();
 		add_vx_menu();
+		break;
+	// Scènes liées : la verticale suit la scène principale quand les deux
+	// portent le même nom (parité SE.Live). Sans ça, il faut basculer DEUX
+	// fois à chaque changement de scène, en direct.
+	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
+		vx_vert_follow_main_scene();
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		// Démarre TOUTES les destinations activées (horizontales ET verticales :
 		// le canvas 9:16 est diffusé par les cibles Multistream marquées vertical).
 		vx_ms_on_streaming_started();
+		// Le tampon de relecture vertical ne tourne QUE pendant le direct :
+		// il encode en continu, l'allumer hors live brûlerait du CPU à vide.
+		vx_backtrack_start();
 		break;
 	// STOPPING (pas STOPPED) : nos sorties partagent les encodeurs du
 	// stream principal, elles doivent lâcher prise avant qu'il ne finisse.
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
 		vx_ms_on_streaming_stopping();
+		vx_backtrack_stop();
 		break;
 	// EXIT : détruire les docks CEF MAINTENANT, avant le déchargement des
 	// modules — sinon crash garanti à chaque fermeture (cf. vx_destroy_docks).
 	case OBS_FRONTEND_EVENT_EXIT:
 		vx_ms_on_streaming_stopping();
+		vx_backtrack_stop();     // libère la sortie AVANT le canvas qu'elle référence
 		vx_scenes_shutdown();    // contient un widget CEF — même règle que les docks
 		vx_webdialog_shutdown(); // idem (émulateur / signalement)
 		vx_ms_dock_destroy();

@@ -50,6 +50,7 @@ target_sources(
     src/vx-platform-logo.cpp
     src/vx-updater.cpp
     src/vx-scenes.cpp
+    src/vx-backtrack.cpp
     src/vx-vertical.cpp
     src/vx-vertical-dock.cpp
     src/vx-backup.cpp

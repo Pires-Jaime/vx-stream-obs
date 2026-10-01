@@ -55,6 +55,14 @@ jobs:
             *) echo 'validTag=false' >> $GITHUB_OUTPUT ;;
           esac
 
+      - name: Check Out Repository 📥
+        if: fromJSON(steps.check.outputs.validTag)
+        uses: actions/checkout@v4
+        with:
+          # Sous-dossier : les artefacts, eux, se téléchargent à la racine.
+          # On ne vient chercher ici que les notes de version.
+          path: repo
+
       - name: Download Build Artifacts 📥
         uses: actions/download-artifact@v4
         if: fromJSON(steps.check.outputs.validTag)
@@ -94,16 +102,31 @@ jobs:
             mv "${exe}" "${root_dir}"
           done
 
-      - name: Generate Checksums 🪪
+      - name: Generate Release Body 🪪
         if: fromJSON(steps.check.outputs.validTag)
         run: |
-          : Generate Checksums 🪪
+          : Generate Release Body 🪪
           if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
           shopt -s extglob
 
-          echo "### Checksums" > ${{ github.workspace }}/CHECKSUMS.txt
+          body="${{ github.workspace }}/BODY.md"
+          notes="${{ github.workspace }}/repo/docs/release-notes/${{ steps.check.outputs.version }}.md"
+
+          # Les notes écrites à la main passent EN PREMIER : c'est ce corps que
+          # /api/vx-stream/version relaie dans la fenêtre de mise à jour d'OBS.
+          # Sans elles, le corps ne contient que des sommes de contrôle et le
+          # streamer n'apprend rien de ce qu'il installe.
+          if [[ -f "${notes}" ]]; then
+            cat "${notes}" > "${body}"
+            printf '\n\n' >> "${body}"
+          else
+            echo "::warning::Aucune note de version pour ${{ steps.check.outputs.version }} (docs/release-notes/)"
+            : > "${body}"
+          fi
+
+          echo "### Checksums" >> "${body}"
           for file in ${{ github.workspace }}/@(*.exe|*.deb|*.ddeb|*.pkg|*.tar.xz|*.zip); do
-            echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> ${{ github.workspace }}/CHECKSUMS.txt
+            echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> "${body}"
           done
 
       - name: Create Release 🛫
@@ -115,7 +138,7 @@ jobs:
           prerelease: ${{ fromJSON(steps.check.outputs.prerelease) }}
           tag_name: ${{ steps.check.outputs.version }}
           name: ${{ needs.build-project.outputs.pluginName }} ${{ steps.check.outputs.version }}
-          body_path: ${{ github.workspace }}/CHECKSUMS.txt
+          body_path: ${{ github.workspace }}/BODY.md
           files: |
             ${{ github.workspace }}/*.exe
             ${{ github.workspace }}/*.zip
